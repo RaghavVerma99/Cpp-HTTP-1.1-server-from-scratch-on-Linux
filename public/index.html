@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus C++ High-Performance Server Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 25, 40, 0.75);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --primary: #4f46e5;
+            --primary-glow: rgba(79, 70, 229, 0.4);
+            --secondary: #06b6d4;
+            --secondary-glow: rgba(6, 182, 212, 0.4);
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --mono-font: 'JetBrains Mono', monospace;
+            --sans-font: 'Plus Jakarta Sans', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--sans-font);
+            overflow-x: hidden;
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(79, 70, 229, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(6, 182, 212, 0.15) 0px, transparent 50%);
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 1.5rem 4rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--card-border);
+            background: rgba(11, 15, 25, 0.8);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 1.5rem;
+            color: white;
+            box-shadow: 0 0 20px var(--primary-glow);
+            animation: pulse 3s infinite alternate;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 15px var(--primary-glow); }
+            100% { transform: scale(1.05); box-shadow: 0 0 25px var(--secondary-glow); }
+        }
+
+        .logo-text h1 {
+            font-size: 1.25rem;
+            font-weight: 800;
+            letter-spacing: -0.025em;
+            background: linear-gradient(to right, #ffffff, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-text p {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-family: var(--mono-font);
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--success);
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.05);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px var(--success);
+            animation: blink 1.5s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        main {
+            max-width: 1200px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 2rem;
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 2rem;
+            flex-grow: 1;
+        }
+
+        .dashboard-main {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 2rem;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .card-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 0.75rem;
+        }
+
+        .card-title svg {
+            width: 20px;
+            height: 20px;
+            color: var(--secondary);
+        }
+
+        /* Stats Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.5rem;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .metric-label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-value {
+            font-size: 1.65rem;
+            font-weight: 800;
+            font-family: var(--mono-font);
+            background: linear-gradient(120deg, #ffffff, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Interactive Forms */
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        .input-control {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.75rem 1rem;
+            color: white;
+            font-family: inherit;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+
+        .input-control:focus {
+            outline: none;
+            border-color: var(--secondary);
+            box-shadow: 0 0 0 2px var(--secondary-glow);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, var(--primary), #6366f1);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 15px var(--primary-glow);
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px var(--primary-glow);
+            opacity: 0.95;
+        }
+
+        .btn:active {
+            transform: translateY(1px);
+        }
+
+        .btn:disabled {
+            background: #2e303d;
+            box-shadow: none;
+            cursor: not-allowed;
+            color: var(--text-muted);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, var(--secondary), #0891b2);
+            box-shadow: 0 4px 15px var(--secondary-glow);
+        }
+
+        .btn-secondary:hover {
+            box-shadow: 0 6px 20px var(--secondary-glow);
+        }
+
+        /* JSON Response Box */
+        .response-container {
+            margin-top: 1.5rem;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 1rem;
+            display: none;
+            position: relative;
+        }
+
+        .response-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            font-family: var(--mono-font);
+        }
+
+        .response-body {
+            font-family: var(--mono-font);
+            font-size: 0.875rem;
+            color: #a7f3d0;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 250px;
+            overflow-y: auto;
+        }
+
+        /* Console Stream */
+        .console-log {
+            background: #05070c;
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            font-family: var(--mono-font);
+            font-size: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            height: 100%;
+            min-height: 480px;
+            overflow-y: auto;
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.8);
+        }
+
+        .log-entry {
+            display: flex;
+            gap: 0.5rem;
+            line-height: 1.4;
+        }
+
+        .log-time {
+            color: var(--text-muted);
+            min-width: 75px;
+        }
+
+        .log-type {
+            font-weight: 700;
+        }
+
+        .log-type.request {
+            color: var(--secondary);
+        }
+
+        .log-type.response {
+            color: var(--success);
+        }
+
+        .log-type.info {
+            color: #8b5cf6;
+        }
+
+        .log-type.bench {
+            color: #f59e0b;
+        }
+
+        .log-text {
+            color: #e5e7eb;
+        }
+
+        /* Benchmark Styles */
+        .progress-bar-bg {
+            flex-grow: 1;
+            background: rgba(255, 255, 255, 0.05);
+            height: 10px;
+            border-radius: 9999px;
+            overflow: hidden;
+            display: none;
+            border: 1px solid var(--card-border);
+        }
+
+        .progress-bar-fill {
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            width: 0%;
+            height: 100%;
+            transition: width 0.05s ease-out;
+        }
+
+        .api-tester-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 900px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+            .api-tester-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--card-border);
+            background: rgba(11, 15, 25, 0.4);
+            margin-top: auto;
+        }
+
+        footer a {
+            color: var(--secondary);
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-container">
+            <div class="logo-icon">NX</div>
+            <div class="logo-text">
+                <h1>Nexus Server</h1>
+                <p>C++20 High-Performance Engine</p>
+            </div>
+        </div>
+        <div class="status-badge" id="server-status-badge">
+            <span class="status-dot"></span>
+            <span id="status-text">Server Online</span>
+        </div>
+    </header>
+
+    <main>
+        <div class="dashboard-main">
+            <!-- Metrics Panel -->
+            <div class="card">
+                <div class="card-title">
+                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"></path>
+                    </svg>
+                    Server Performance Metrics (Live)
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Uptime</div>
+                        <div class="metric-value" id="metric-uptime">0.0s</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Thread Workers</div>
+                        <div class="metric-value" id="metric-threads">4</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Connection Library</div>
+                        <div class="metric-value" id="metric-engine">Winsock2</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Dynamic Latency Benchmark widget -->
+            <div class="card">
+                <div class="card-title">
+                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    Live Latency Benchmark (100 Requests)
+                </div>
+                <div style="display: flex; gap: 1.5rem; align-items: center; margin-bottom: 1.5rem;">
+                    <button class="btn btn-secondary" id="btn-run-benchmark">Run Stress Test</button>
+                    <div class="progress-bar-bg" id="benchmark-progress-bar-container">
+                        <div class="progress-bar-fill" id="benchmark-progress-bar"></div>
+                    </div>
+                </div>
+                <div class="metrics-grid" id="benchmark-metrics" style="display: none;">
+                    <div class="metric-card" style="border-color: rgba(79, 70, 229, 0.3)">
+                        <div class="metric-label" style="color: #818cf8">Avg Latency</div>
+                        <div class="metric-value" id="bench-avg" style="color: #a5b4fc">--</div>
+                    </div>
+                    <div class="metric-card" style="border-color: rgba(6, 182, 212, 0.3)">
+                        <div class="metric-label" style="color: #22d3ee">Min / Max Latency</div>
+                        <div class="metric-value" id="bench-minmax" style="color: #67e8f9">--</div>
+                    </div>
+                    <div class="metric-card" style="border-color: rgba(16, 185, 129, 0.3)">
+                        <div class="metric-label" style="color: #34d399">Throughput</div>
+                        <div class="metric-value" id="bench-rps" style="color: #6ee7b7">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- API Handlers & Playground -->
+            <div class="card">
+                <div class="card-title">
+                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"></path>
+                    </svg>
+                    Dynamic API Playground
+                </div>
+
+                <div class="api-tester-layout">
+                    <!-- Greet Form -->
+                    <div>
+                        <h3 style="margin-bottom: 1rem; font-size: 1rem; color: var(--secondary)">GET Request Endpoint</h3>
+                        <div class="form-group">
+                            <label for="greet-name">Input Parameter (?name=...)</label>
+                            <input type="text" id="greet-name" class="input-control" placeholder="Enter name (e.g. Raghav)" value="Raghav">
+                        </div>
+                        <button class="btn" id="btn-run-greet">
+                            Execute Greet
+                        </button>
+
+                        <div class="response-container" id="greet-response-container">
+                            <div class="response-header">
+                                <span>GET /api/greet</span>
+                                <span style="color: var(--success)">200 OK</span>
+                            </div>
+                            <div class="response-body" id="greet-response-body"></div>
+                        </div>
+                    </div>
+
+                    <!-- Echo Form -->
+                    <div>
+                        <h3 style="margin-bottom: 1rem; font-size: 1rem; color: var(--primary)">POST Request Endpoint</h3>
+                        <div class="form-group">
+                            <label for="echo-payload">POST Payload (Raw String Body)</label>
+                            <input type="text" id="echo-payload" class="input-control" placeholder="Type something to echo back" value="Hello C++ Server!">
+                        </div>
+                        <button class="btn btn-secondary" id="btn-run-echo">
+                            Execute Echo
+                        </button>
+
+                        <div class="response-container" id="echo-response-container">
+                            <div class="response-header">
+                                <span>POST /api/echo</span>
+                                <span style="color: var(--success)">200 OK</span>
+                            </div>
+                            <div class="response-body" id="echo-response-body"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar (Logs and Server info) -->
+        <div style="display: flex; flex-direction: column; gap: 2rem;">
+            <div class="card" style="flex-grow: 1; display: flex; flex-direction: column; height: 100%;">
+                <div class="card-title">
+                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V6.75a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm.75-12h9v9h-9v-9z"></path>
+                    </svg>
+                    Active Connection Log
+                </div>
+                <div class="console-log" id="console-stream">
+                    <div class="log-entry">
+                        <span class="log-time" id="init-time">00:00:00</span>
+                        <span class="log-type info">[INFO]</span>
+                        <span class="log-text">Dashboard connected to server socket.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer>
+        <p>Built with high performance systems architecture. C++ Core Web Engine &copy; 2026. <a href="#" onclick="alert('Server source is located in the local workspace directory under /src/main.cpp')">View Server Code</a></p>
+    </footer>
+
+    <script>
+        // Log Helper
+        const consoleStream = document.getElementById('console-stream');
+        function addLog(type, text) {
+            const now = new Date();
+            const timeStr = now.toTimeString().split(' ')[0];
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            
+            let typeClass = 'info';
+            if (type.toUpperCase().includes('REQ')) typeClass = 'request';
+            if (type.toUpperCase().includes('RES')) typeClass = 'response';
+            if (type.toUpperCase().includes('BENCH')) typeClass = 'bench';
+            
+            entry.innerHTML = `
+                <span class="log-time">${timeStr}</span>
+                <span class="log-type ${typeClass}">${type}</span>
+                <span class="log-text">${text}</span>
+            `;
+            consoleStream.appendChild(entry);
+            consoleStream.scrollTop = consoleStream.scrollHeight;
+        }
+
+        // Set initial logger time
+        document.getElementById('init-time').innerText = new Date().toTimeString().split(' ')[0];
+
+        // System Poll Loop for Status
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('metric-uptime').innerText = data.uptime_seconds.toFixed(1) + 's';
+                    document.getElementById('metric-threads').innerText = data.thread_pool_workers;
+                    document.getElementById('metric-engine').innerText = data.engine;
+                    
+                    document.getElementById('server-status-badge').style.background = 'rgba(16, 185, 129, 0.1)';
+                    document.getElementById('server-status-badge').style.borderColor = 'rgba(16, 185, 129, 0.2)';
+                    document.getElementById('server-status-badge').style.color = 'var(--success)';
+                    document.getElementById('status-text').innerText = 'Server Online';
+                }
+            } catch (err) {
+                console.error("Poller disconnected: ", err);
+                document.getElementById('server-status-badge').style.background = 'rgba(239, 68, 110, 0.1)';
+                document.getElementById('server-status-badge').style.borderColor = 'rgba(239, 68, 110, 0.2)';
+                document.getElementById('server-status-badge').style.color = 'var(--danger)';
+                document.getElementById('status-text').innerText = 'Server Disconnected';
+            }
+        }
+
+        setInterval(fetchStatus, 1000);
+        fetchStatus();
+
+        // Greet Request Runner
+        document.getElementById('btn-run-greet').addEventListener('click', async () => {
+            const name = document.getElementById('greet-name').value;
+            addLog('[REQ-GET]', `/api/greet?name=${name}`);
+            
+            try {
+                const start = performance.now();
+                const res = await fetch(`/api/greet?name=${encodeURIComponent(name)}`);
+                const duration = (performance.now() - start).toFixed(2);
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    addLog('[RES-200]', `/api/greet fetched in ${duration}ms`);
+                    
+                    const box = document.getElementById('greet-response-container');
+                    const body = document.getElementById('greet-response-body');
+                    box.style.display = 'block';
+                    body.innerText = JSON.stringify(data, null, 2);
+                } else {
+                    addLog('[RES-ERROR]', `Failed with status code ${res.status}`);
+                }
+            } catch (err) {
+                addLog('[RES-CRASH]', `Network request failed: ${err.message}`);
+            }
+        });
+
+        // Echo Request Runner
+        document.getElementById('btn-run-echo').addEventListener('click', async () => {
+            const payload = document.getElementById('echo-payload').value;
+            addLog('[REQ-POST]', `/api/echo with body length ${payload.length}`);
+            
+            try {
+                const start = performance.now();
+                const res = await fetch('/api/echo', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'text/plain; charset=utf-8'
+                    },
+                    body: payload
+                });
+                const duration = (performance.now() - start).toFixed(2);
+                
+                if (res.ok) {
+                    const text = await res.text();
+                    addLog('[RES-200]', `/api/echo processed in ${duration}ms`);
+                    
+                    const box = document.getElementById('echo-response-container');
+                    const body = document.getElementById('echo-response-body');
+                    box.style.display = 'block';
+                    body.innerText = text;
+                } else {
+                    addLog('[RES-ERROR]', `Failed with status code ${res.status}`);
+                }
+            } catch (err) {
+                addLog('[RES-CRASH]', `Network request failed: ${err.message}`);
+            }
+        });
+
+        // Latency Benchmark Stress Tester
+        document.getElementById('btn-run-benchmark').addEventListener('click', async () => {
+            const btn = document.getElementById('btn-run-benchmark');
+            const progressContainer = document.getElementById('benchmark-progress-bar-container');
+            const progressBar = document.getElementById('benchmark-progress-bar');
+            const metricsDiv = document.getElementById('benchmark-metrics');
+            
+            btn.disabled = true;
+            btn.innerText = 'Stress Testing...';
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            
+            addLog('[BENCH-START]', 'Initiating parallel benchmark: 100 requests to /api/status...');
+            
+            const totalRequests = 100;
+            const latencies = [];
+            const startTime = performance.now();
+            
+            // Execute batch sizes of 10 requests concurrently to keep connections high and fast
+            const batchSize = 10;
+            
+            for (let i = 0; i < totalRequests; i += batchSize) {
+                const batchPromises = [];
+                for (let j = 0; j < batchSize && (i + j) < totalRequests; j++) {
+                    const task = (async () => {
+                        const reqStart = performance.now();
+                        try {
+                            const response = await fetch('/api/status');
+                            if (response.ok) {
+                                const reqDuration = performance.now() - reqStart;
+                                latencies.push(reqDuration);
+                            }
+                        } catch (e) {
+                            // Request failed (e.g. socket exhaustion or timeout)
+                        }
+                    })();
+                    batchPromises.push(task);
+                }
+                
+                await Promise.all(batchPromises);
+                const percent = Math.round((Math.min(i + batchSize, totalRequests) / totalRequests) * 100);
+                progressBar.style.width = `${percent}%`;
+            }
+            
+            const totalDuration = performance.now() - startTime;
+            btn.disabled = false;
+            btn.innerText = 'Run Stress Test';
+            
+            if (latencies.length > 0) {
+                const sum = latencies.reduce((a, b) => a + b, 0);
+                const avg = (sum / latencies.length).toFixed(2);
+                const min = Math.min(...latencies).toFixed(2);
+                const max = Math.max(...latencies).toFixed(2);
+                const rps = Math.round((latencies.length / (totalDuration / 1000)));
+                
+                document.getElementById('bench-avg').innerText = `${avg} ms`;
+                document.getElementById('bench-minmax').innerText = `${min} / ${max} ms`;
+                document.getElementById('bench-rps').innerText = `${rps} RPS`;
+                
+                metricsDiv.style.display = 'grid';
+                addLog('[BENCH-DONE]', `Benchmark complete. Avg latency: ${avg}ms | Throughput: ${rps} RPS`);
+            } else {
+                addLog('[BENCH-FAIL]', 'Benchmark execution failed. Check server log output.');
+            }
+        });
+    </script>
+</body>
+</html>
