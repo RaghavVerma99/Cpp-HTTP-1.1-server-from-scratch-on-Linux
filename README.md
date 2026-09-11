@@ -23,57 +23,73 @@
 
 ## 🧰 Tech Stack
 
-| Layer | Choice | Why |
+| Layer | Choice | Why it matters |
 | --- | --- | --- |
-| **Language** | C++20 | RAII for resource cleanup, `std::string`/`std::filesystem` built in, no GC latency spikes |
-| **Event loop** | `epoll` (level-triggered) | Multiplexes thousands of idle sockets in a single thread — the Linux standard for this |
-| **Sockets** | Non-blocking `accept4` / `recv` / `send` | No thread parked per connection; one loop thread handles all readiness |
-| **Wakeup channel** | `eventfd` | Worker → loop notifications without touching socket state off-thread, no signal races |
-| **Concurrency** | Bounded worker pool (default 4, `std::thread` + condition variable) | CPU/disk work happens off the event loop so I/O never stalls behind parsing or file reads |
-| **Static serving** | `std::filesystem` + `ifstream` | Path canonicalization for traversal safety; MIME mapping by extension |
-| **Build** | Makefile / CMake / Docker | Zero deps — compiles with plain `g++`, no linking beyond `pthread` |
+| **Language** | C++20 | Native speed, RAII for cleanup, and `std::string` / `std::filesystem` so there's no need for third-party libraries |
+| **Event loop** | `epoll` (level-triggered) | The Linux way to watch thousands of sockets from one thread and only act when a socket actually has data |
+| **Sockets** | Non-blocking `accept4` / `recv` / `send` | Calls never block; if there's nothing to read the call returns immediately and the loop moves on |
+| **Wakeup channel** | `eventfd` | A thread-safe "nudge" so worker threads can tell the event loop *a response is ready* without touching socket internals |
+| **Concurrency** | Worker pool of 4 threads (`std::thread` + condition variable) | Slow work (parsing, disk reads) happens off the event loop so one slow request never stalls everyone else |
+| **Static serving** | `std::filesystem` + `ifstream` | Canonical path resolution for traversal safety; MIME type lookup by file extension |
+| **Build** | Makefile / CMake / Docker | It compiles with a single `g++` command; the only thing linked beyond the standard library is `pthread` |
 
-Everything above is part of the Linux kernel or the C++ standard library.
-There are no third-party libraries anywhere in the project.
+**In simple terms:** the day-to-day plumbing of this project is just the
+Linux kernel (`epoll`, sockets) plus the C++ standard library. Nothing else.
+It's a good way to see what "high performance" actually means at the
+systems level, because everything is right here in plain sight.
 
 ---
 
 ## 📌 What It Does
 
-Nexus is a working HTTP/1.1 web server that:
+Nexus is a working HTTP/1.1 web server. Concretely, each step of the
+request lifecycle is handled from scratch:
 
-- **Listens** on a configurable port and accepts connections with `accept4`
-- **Parses** requests incrementally (headers first, then body)
-- **Routes** requests to registered handlers, or **serves static files** from `public/`
-- **Responds** with fully serialized HTTP responses (`Content-Length`, `Date`, `Server` headers)
-- **Keeps connections alive** across requests (HTTP/1.1 keep-alive by default)
-- **Handles multiple requests per connection** (pipelining) sequentially
-- **Shuts down cleanly** on `SIGINT` / `SIGTERM` through an `eventfd` wakeup
+1. **Listens** on a configurable port and accepts incoming connections.
+2. **Reads** request bytes off the socket as they arrive.
+3. **Parses** the request into usable pieces: method, path, query string,
+   headers, and body.
+4. **Routes** the parsed request — either to a C++ handler you registered,
+   or to a static file in `public/`.
+5. **Serializes** a proper HTTP response with `Content-Length`, `Date`, and
+   `Server` headers.
+6. **Writes** the response back, then keeps the connection open for the
+   next request (keep-alive).
+
+It also tolerates the messy parts of the real world: bare `\n` line
+endings, pipelined requests queued on one connection, oversized bodies
+(`413`), `HEAD` requests, and path traversal attempts (`403`).
 
 ---
 
 ## 🎯 Why: Design Goals
 
-The three decisions that shaped everything else:
+These three goals drove every decision in the code:
 
 | Goal | Consequence |
 | --- | --- |
-| **Handle many connections with few threads** | A single-threaded event loop owns all I/O. No `thread-per-connection` — that would waste a thread (and its stack) on every idle keep-alive socket. |
-| **Never block the loop on slow work** | Parsing, routing, and file I/O are pushed to a worker pool. The loop only does `recv`/`send` and state tracking. |
-| **Keep it dependency-free and readable** | Every line is system code — you can step through the whole request lifecycle in a debugger without third-party code. |
+| **Serve many connections with few threads** | A single event-loop thread owns *all* I/O. Nobody spawns a thread per connection, because an idle keep-alive client would waste a whole thread (and its 8 MB stack) just waiting. |
+| **Never block the loop on slow work** | Parsing, routing, and file I/O run on a bounded worker pool. The loop only does fast things: `recv`, `send`, and bookkeeping. |
+| **Stay dependency-free and readable** | Every line is system-level code you can step through in a debugger. No framework hides what's happening. |
+
+**In simple terms:** the classic beginner server answers one visitor at a
+time. That's fine until one visitor stalls and everyone behind them waits.
+Nexus splits the job — one person watching all the doors, a few people
+doing the actual fetching — so nobody waits on anyone else.
 
 ---
 
 ## 🏗️ Architecture
 
-Nexus splits the work into two planes:
+Nexus is organized into two halves that talk to each other through a task queue.
 
-- **The I/O plane (1 thread):** the event loop. It watches all file
-  descriptors with `epoll_wait`, reads request bytes, dispatches complete
-  requests to workers, and flushes finished responses back to clients.
-- **The compute plane (N workers):** it parses the full request, resolves
-  the route, reads from disk (or runs the handler), serializes the response,
-  and hands it back through an `eventfd` wakeup.
+- **The I/O plane (1 thread):** the *event loop*. It watches every open
+  socket with `epoll_wait`. When a socket is readable it reads the bytes;
+  when a full request is assembled it sends that request to a worker.
+  When a worker delivers a finished response, the loop writes it out.
+- **The compute plane (4 worker threads):** the *doers*. They parse the
+  request, resolve the route or open the file, produce the `HttpResponse`,
+  serialize it to a string, and hand it back.
 
 ```
                   ┌─────────────────────────────────────────────┐
@@ -96,6 +112,28 @@ Nexus splits the work into two planes:
    │  drainCompleted ─► set EPOLLOUT ─► send(outBuf) ─► re-arm    │
    └─────────────────────────────────────────────────────────────┘
 ```
+
+### The three key ideas, explained simply
+
+**`epoll` — watching many doors at once.**
+Normally reading a socket is one-at-a-time: you ask, you wait, you get.
+`epoll` flips it around — you say "tell me when any of these sockets has
+something for me," and the kernel answers with only the sockets that are
+ready. One thread can then service thousands of connections. That single
+`recv`-only-once-ready property is why the server stays snappy under load.
+
+**`eventfd` — the "ping" between workers and the loop.**
+Workers live on their own threads. To hand a completed response back they
+can't just poke the loop's data structures safely. Instead they increment
+a tiny kernel counter (`write(eventfd, 1)`), which wakes `epoll_wait`. The
+loop then drains whatever responses have piled up. Simple, atomic, and
+deadlock-free.
+
+**The worker pool — bounded parallelism.**
+Parsing, route lookup, and file reads are CPU/disk work. Doing that on the
+loop thread would stop new `recv`s from happening. Instead, complete
+requests are queued and a fixed set of 4 workers consumes them. Bounded
+pool = bounded memory, no thread explosion, and the loop never blocks.
 
 ### Request lifecycle (sequence diagram)
 
@@ -128,47 +166,49 @@ sequenceDiagram
 
 ### Per-connection state
 
-Every accepted socket carries a small struct (`include/Connection.hpp`):
+Every accepted socket carries a small state struct (`include/Connection.hpp`):
 
 | Field | Role |
 | --- | --- |
-| `inBuf` | Accumulated bytes not yet parsed |
-| `outBuf` / `outOffset` | Serialized response pending `send()` |
-| `keepAlive` | Whether to re-arm `EPOLLIN` after flushing |
-| `taskInFlight` | True while a worker owns this connection — prevents double-dispatch |
-| `peerClosed` | FIN received; deliver the response, then close |
-| `abandoned` | Peer unreachable while a task is in flight — defer `close()` until drained |
+| `inBuf` | Bytes received but not yet parsed into a request |
+| `outBuf` / `outOffset` | The serialized response, and how much has been sent so far |
+| `keepAlive` | Whether to watch for a next request after this response flushes |
+| `taskInFlight` | True while a worker is busy with this connection — stops two requests being dispatched at once |
+| `peerClosed` | The client sent FIN; deliver the response, then close |
+| `abandoned` | The connection died while a task was in flight — defer `close()` until the response is drained |
 
-> **Why `taskInFlight` matters:** the fd is never closed while a task is in
-> flight. If a peer disconnects mid-request and the fd were closed and
-> reused by `accept4`, the worker's finished response would be written to
-> the wrong connection. The `abandoned` flag defers `close()` until the
-> worker's response has been drained.
+**Why `taskInFlight` exists:** an fd must never be closed while a worker is
+still using it. If a client disconnects mid-request and the loop closed
+that fd (and `accept4` handed the *same number*) to a brand-new connection,
+the worker's finished response would be written into someone else's stream.
+`taskInFlight` + `abandoned` make the close wait until the dust settles.
 
 ---
 
 ## ⚙️ How: Implementation
 
-Each step below shows the core idea and the actual code that implements it.
+Each step below shows the core idea, the actual code, and what it achieves.
 
-### 1. Non-blocking listener
+### 1. The listener — one non-blocking socket
 
-The listening socket is non-blocking and close-on-exec, plus `SO_REUSEADDR`
-so restarts don't hit `Address already in use`:
+The socket is created non-blocking and close-on-exec, with `SO_REUSEADDR`
+so a quick restart doesn't fail with `Address already in use`:
 
 ```cpp
 listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
 setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 bind(listenSocket, ...);
 listen(listenSocket, SOMAXCONN);
-epoll_ctl(epollFd, EPOLL_CTL_ADD, listenSocket, &ev);   // EPOLLIN
+epoll_ctl(epollFd, EPOLL_CTL_ADD, listenSocket, &ev);   // watch for EPOLLIN
 ```
 
-### 2. The event loop
+**What it achieves:** one descriptor represents "the front door"; the
+kernel tells us when a visitor has arrived, and `acceptConnections()` loops
+on `accept4` until `EAGAIN`, grabbing everyone waiting.
 
-`epoll_wait` returns whatever is ready. Three kinds of fd can appear:
-the listener (accept), the `eventfd` (worker handoff), or a connection
-(read/write). Everything else in the program idles for free:
+### 2. The event loop — react to what's ready
+
+`epoll_wait` returns only the descriptors that need attention:
 
 ```cpp
 int n = epoll_wait(epollFd, events.data(), events.size(), -1);
@@ -179,25 +219,30 @@ for (auto& e : events) {
 }
 ```
 
-### 3. Incremental parsing (headers before body)
+There are exactly three sources of events, and everything else in the
+program is completely idle until the kernel reports them. This is the
+heart of "one thread, many connections."
 
-The parser finds the header terminator first, then decides how large the
-body is. **Nothing is buffered until the body is known to be complete** —
-and oversized declared bodies (over 8 MB) are rejected without being read.
+### 3. Incremental parsing — headers first, body only when complete
+
+The parser first locates the header terminator, then decides how big the
+body must be. Important consequences: incomplete requests (no body yet)
+return `{false, 0}` and the loop just keeps reading; an over-sized declared
+body is refused immediately with a 413 *before* megabytes are buffered.
 
 ```cpp
-size_t headerEnd = buf.find("\r\n\r\n");            // or "\n\n"
-if (headerEnd == npos) return {false, 0};           // incomplete, wait for more
+size_t headerEnd = buf.find("\r\n\r\n");            // bare "\n\n" also works
+if (headerEnd == npos) return {false, 0};           // not enough data yet
 size_t bodyLen = stoull(contentLength);
 if (bodyLen > maxBody) return {true, ...};          // caller answers 413
-if (used + bodyLen > buf.size()) return {false, 0}; // body not here yet
+if (used + bodyLen > buf.size()) return {false, 0}; // body has not arrived
 ```
 
-### 4. Dispatch to the worker pool
+### 4. Dispatch to the worker pool — hand off, don't block
 
-The loop erases the consumed bytes, marks the connection busy, and enqueues
-a task. The worker runs the handler on its own thread, then wakes the loop
-through `eventfd`:
+When a request is complete the loop erases its bytes, marks the connection
+busy, and hands the work to the pool. The worker runs the handler, then
+wakes the loop through the `eventfd`:
 
 ```cpp
 conn.inBuf.erase(0, used);
@@ -209,11 +254,14 @@ threadPool.enqueue([this, fd, keepAlive, req = std::move(req)]() {
 });
 ```
 
-### 5. Static file serving with path safety
+The lambda captures the connection's fd and the parsed request by value —
+the loop is free to keep serving other connections while the worker works.
 
-The requested path is resolved with `fs::canonical` and verified — via
-`fs::relative` — to stay strictly inside the static root. A `../`
-escaping a path resolves to `..` components and earns a `403`:
+### 5. Static files — served safely
+
+The requested path is canonicalized and verified to resolve strictly
+inside the static root. Paths that climb out with `..` resolve to `..`
+components and are refused with a 403:
 
 ```cpp
 fs::path targetPath = fs::canonical(baseDir / relPath.substr(1));
@@ -221,25 +269,30 @@ for (auto& c : fs::relative(targetPath, baseDir))
     if (c == "..") return errorResponse(403, "Forbidden", ...);
 ```
 
-### 6. Example routes (`src/main.cpp`)
+The response's `Content-Type` is inferred from the file extension via
+`MimeTypes::getType`, and binary files are read without corruption
+(`std::ios::binary`).
 
-Routes are registered with a method + path and a handler function. The
-handler receives the parsed request and returns a response:
+### 6. Example routes — how to add an API
+
+Routes are matched exactly on method + path and call a handler that maps a
+`HttpRequest` to an `HttpResponse`:
 
 ```cpp
 server->route("GET", "/api/greet", [](const HttpRequest& req) {
     HttpResponse res;
     res.headers["Content-Type"] = "application/json";
 
-    std::string name = req.queryParams.find("name") != req.queryParams.end()
-                     ? req.queryParams["name"] : "Guest";
-    res.body = R"({"message": "Hello, )" + jsonEscape(name) + R"(! Welcome to the C++ Web Server."})";
+    std::string name = req.queryParams.count("name") ? req.queryParams.at("name")
+                                                     : "Guest";
+    res.body = R"({"message": "Hello, )" + jsonEscape(name) + R"(..."})";
     return res;
 });
 ```
 
-`jsonEscape` runs user input through an escaper, so a query value like
-`<script>alert(1)</script>` is returned as *data*, never as live HTML.
+`jsonEscape` guarantees user input is data, not markup: a query value of
+`<script>alert(1)</script>` is JSON-escaped before being placed in the
+response body, so it can never execute in a browser.
 
 ---
 
@@ -257,7 +310,7 @@ cmake -B build -S .
 cmake --build build -j
 ```
 
-Compilation is a single `g++` invocation — nothing to install:
+Under the hood it's a single compilation — no packages to install:
 
 ```bash
 g++ -std=c++20 -O3 -Wall -Wextra -Iinclude src/main.cpp src/HttpServer.cpp -o nexus-server
@@ -273,10 +326,11 @@ g++ -std=c++20 -O3 -Wall -Wextra -Iinclude src/main.cpp src/HttpServer.cpp -o ne
 
 | Signal | Behavior |
 | --- | --- |
-| `SIGINT` / `SIGTERM` | `write(eventfd)` wakes the loop → loop drains, closes fds, shuts down workers → exit 0 |
+| `SIGINT` / `SIGTERM` | A `write(eventfd)` wakes the loop → the loop drains in-flight work, closes every fd, shuts the workers down, exits 0 |
 
-Then open <http://localhost:8080> — the dashboard ships a live latency
-benchmark button and an API playground for the endpoints below.
+Then open <http://localhost:8080>. The served dashboard includes a live
+latency benchmark button (100 requests to `/api/status`) and an API
+playground for the endpoints below — a good way to watch the server work.
 
 ---
 
@@ -300,9 +354,9 @@ curl -X POST -d '{"key":"value"}' localhost:8080/api/echo
 # → {"key":"value"}
 ```
 
-Unmatched paths fall through to the static root (`public/`); a missing file
-returns `404`, and a path that cannot be canonicalized inside the root
-returns `403`.
+Anything that isn't a registered route falls through to the static root
+(`public/`): a missing file is a `404`, a path that escapes the root is a
+`403`, and a `POST` with no matching route is a `404`.
 
 ---
 
@@ -310,17 +364,17 @@ returns `403`.
 
 ```
 ├── include/
-│   ├── Connection.hpp      # per-connection state machine
+│   ├── Connection.hpp      # per-connection state (buffers, keep-alive, in-flight guard)
 │   ├── HttpParser.hpp      # incremental parser + URL decoding
 │   ├── HttpRequest.hpp     # request model (method/path/headers/body/query)
-│   ├── HttpResponse.hpp    # serialization (Content-Length / Date / Server)
+│   ├── HttpResponse.hpp    # response serialization (Content-Length / Date / Server)
 │   ├── HttpServer.hpp      # event loop + routing declarations
 │   ├── MimeTypes.hpp       # extension → Content-Type map
 │   └── ThreadPool.hpp      # bounded worker pool
 ├── src/
 │   ├── HttpServer.cpp      # sockets, epoll, dispatch, static files, errors
 │   └── main.cpp            # wiring, routes, signals, JSON escaping
-├── public/                 # static web root (dashboard)
+├── public/                 # static web root (the dashboard)
 ├── CMakeLists.txt          # CMake build
 ├── Dockerfile              # multi-stage container build
 ├── Makefile                # make / make run / make clean
@@ -331,11 +385,18 @@ returns `403`.
 
 ## ⏭️ Limitations / Future Work
 
-- **No idle timeouts** — a silent keep-alive client holds an fd indefinitely.
-- **No TLS / HTTP/2** — delegate HTTPS to a reverse proxy when exposed publicly.
-- **Whole files buffered on read** — large static files load fully into memory.
-- **No config file** — port, workers, routes, and static root live in `src/main.cpp`.
-- **No automated tests yet** — the request/parser edge cases are worth a test suite.
+Honest assessment of what this project isn't yet:
+
+- **No idle timeouts** — a perfectly still keep-alive client holds an fd
+  (and its slot in the connection table) forever.
+- **No TLS / HTTP/2** — traffic is plain HTTP/1.1; HTTPS belongs to a
+  reverse proxy in front of it.
+- **Whole files are buffered** — a large static file is read fully into
+  memory rather than streamed with `sendfile`.
+- **No config file** — port, workers, routes, and static root are baked
+  into `src/main.cpp`.
+- **No automated tests** — the parser edge cases (bare `\n`, chunked,
+  giant `Content-Length`) would benefit from a test suite.
 
 ---
 
