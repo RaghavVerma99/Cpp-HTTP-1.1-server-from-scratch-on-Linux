@@ -1,0 +1,4 @@
+nexus-server
+build/
+*.o
+*.exe

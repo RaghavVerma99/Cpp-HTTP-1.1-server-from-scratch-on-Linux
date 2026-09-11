@@ -176,7 +176,6 @@
             color: var(--secondary);
         }
 
-        /* Stats Grid */
         .metrics-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -211,7 +210,6 @@
             -webkit-text-fill-color: transparent;
         }
 
-        /* Interactive Forms */
         .form-group {
             margin-bottom: 1.25rem;
         }
@@ -285,7 +283,6 @@
             box-shadow: 0 6px 20px var(--secondary-glow);
         }
 
-        /* JSON Response Box */
         .response-container {
             margin-top: 1.5rem;
             background: rgba(0, 0, 0, 0.4);
@@ -316,7 +313,6 @@
             overflow-y: auto;
         }
 
-        /* Console Stream */
         .console-log {
             background: #05070c;
             border: 1px solid var(--card-border);
@@ -368,7 +364,6 @@
             color: #e5e7eb;
         }
 
-        /* Benchmark Styles */
         .progress-bar-bg {
             flex-grow: 1;
             background: rgba(255, 255, 255, 0.05);
@@ -440,13 +435,12 @@
 
     <main>
         <div class="dashboard-main">
-            <!-- Metrics Panel -->
-            <div class="card">
-                <div class="card-title">
-                    <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"></path>
-                    </svg>
-                    Server Performance Metrics (Live)
+<div class="card">
+                    <div class="card-title">
+                        <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"></path>
+                        </svg>
+                        Server Performance Metrics (Live)
                 </div>
                 <div class="metrics-grid">
                     <div class="metric-card">
@@ -458,13 +452,12 @@
                         <div class="metric-value" id="metric-threads">4</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">Connection Library</div>
-                        <div class="metric-value" id="metric-engine">Winsock2</div>
+                        <div class="metric-label">Event Engine</div>
+                        <div class="metric-value" id="metric-engine">Linux epoll</div>
                     </div>
                 </div>
             </div>
 
-            <!-- Dynamic Latency Benchmark widget -->
             <div class="card">
                 <div class="card-title">
                     <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -494,7 +487,6 @@
                 </div>
             </div>
 
-            <!-- API Handlers & Playground -->
             <div class="card">
                 <div class="card-title">
                     <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -504,7 +496,6 @@
                 </div>
 
                 <div class="api-tester-layout">
-                    <!-- Greet Form -->
                     <div>
                         <h3 style="margin-bottom: 1rem; font-size: 1rem; color: var(--secondary)">GET Request Endpoint</h3>
                         <div class="form-group">
@@ -524,7 +515,6 @@
                         </div>
                     </div>
 
-                    <!-- Echo Form -->
                     <div>
                         <h3 style="margin-bottom: 1rem; font-size: 1rem; color: var(--primary)">POST Request Endpoint</h3>
                         <div class="form-group">
@@ -547,7 +537,6 @@
             </div>
         </div>
 
-        <!-- Sidebar (Logs and Server info) -->
         <div style="display: flex; flex-direction: column; gap: 2rem;">
             <div class="card" style="flex-grow: 1; display: flex; flex-direction: column; height: 100%;">
                 <div class="card-title">
@@ -572,7 +561,6 @@
     </footer>
 
     <script>
-        // Log Helper
         const consoleStream = document.getElementById('console-stream');
         function addLog(type, text) {
             const now = new Date();
@@ -594,10 +582,8 @@
             consoleStream.scrollTop = consoleStream.scrollHeight;
         }
 
-        // Set initial logger time
         document.getElementById('init-time').innerText = new Date().toTimeString().split(' ')[0];
 
-        // System Poll Loop for Status
         async function fetchStatus() {
             try {
                 const res = await fetch('/api/status');
@@ -624,7 +610,6 @@
         setInterval(fetchStatus, 1000);
         fetchStatus();
 
-        // Greet Request Runner
         document.getElementById('btn-run-greet').addEventListener('click', async () => {
             const name = document.getElementById('greet-name').value;
             addLog('[REQ-GET]', `/api/greet?name=${name}`);
@@ -650,7 +635,6 @@
             }
         });
 
-        // Echo Request Runner
         document.getElementById('btn-run-echo').addEventListener('click', async () => {
             const payload = document.getElementById('echo-payload').value;
             addLog('[REQ-POST]', `/api/echo with body length ${payload.length}`);
@@ -682,7 +666,6 @@
             }
         });
 
-        // Latency Benchmark Stress Tester
         document.getElementById('btn-run-benchmark').addEventListener('click', async () => {
             const btn = document.getElementById('btn-run-benchmark');
             const progressContainer = document.getElementById('benchmark-progress-bar-container');
@@ -700,7 +683,6 @@
             const latencies = [];
             const startTime = performance.now();
             
-            // Execute batch sizes of 10 requests concurrently to keep connections high and fast
             const batchSize = 10;
             
             for (let i = 0; i < totalRequests; i += batchSize) {
@@ -715,7 +697,6 @@
                                 latencies.push(reqDuration);
                             }
                         } catch (e) {
-                            // Request failed (e.g. socket exhaustion or timeout)
                         }
                     })();
                     batchPromises.push(task);

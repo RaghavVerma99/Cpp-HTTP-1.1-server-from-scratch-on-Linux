@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Connection.hpp"
 #include "HttpRequest.hpp"
 #include "HttpResponse.hpp"
 #include "ThreadPool.hpp"
@@ -8,10 +9,10 @@
 #include <unordered_map>
 #include <functional>
 #include <memory>
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include <vector>
+#include <mutex>
+#include <atomic>
 
-// Type definition for route handler functions
 using RouteHandler = std::function<HttpResponse(const HttpRequest&)>;
 
 class HttpServer {
@@ -19,40 +20,50 @@ public:
     HttpServer(const std::string& address, int port, size_t threadPoolSize = 4);
     ~HttpServer();
 
-    // Disable copy constructors
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
 
-    // Registers a handler for a specific HTTP method and path
     void route(const std::string& method, const std::string& path, RouteHandler handler);
-
-    // Set root directory for serving static files
     void setStaticDirectory(const std::string& dirPath);
-
-    // Starts the server main listening loop (blocking)
     void start();
-
-    // Stop the server
     void stopServer();
 
+    size_t workerCount() const { return threadPool.size(); }
+
 private:
-    void initWinsock();
-    void cleanupWinsock();
+    struct CompletedResponse {
+        int fd;
+        std::string response;
+    };
+
     void createSocket();
     void bindAndListen();
-    void handleClient(SOCKET clientSocket);
-    
-    // Serve static files from root directory
+    void eventLoop();
+    void acceptConnections();
+    void readConnection(Connection& conn);
+    void writeConnection(Connection& conn);
+    void dispatch(Connection& conn);
+    void closeConnection(int fd);
+    void drainCompleted();
+    void setInterest(int fd, uint32_t events);
+
+    void enqueueCompleted(int fd, std::string response);
+
+    HttpResponse handleRequest(const HttpRequest& req);
     HttpResponse serveStatic(const std::string& path);
 
     std::string ipAddress;
     int serverPort;
-    SOCKET serverSocket;
-    bool running;
+    int listenSocket = -1;
+    int epollFd = -1;
+    int eventFd = -1;
+    std::atomic<bool> running{false};
     std::string staticDir;
 
     ThreadPool threadPool;
-
-    // Key format: "METHOD:PATH", e.g. "GET:/api/status"
+    std::unordered_map<int, std::unique_ptr<Connection>> connections;
     std::unordered_map<std::string, RouteHandler> routes;
+
+    std::mutex completedMutex;
+    std::vector<CompletedResponse> completed;
 };

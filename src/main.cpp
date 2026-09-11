@@ -1,24 +1,46 @@
 #include "../include/HttpServer.hpp"
+
 #include <iostream>
 #include <csignal>
 #include <memory>
 #include <chrono>
 #include <sstream>
+#include <iomanip>
 
 std::unique_ptr<HttpServer> server = nullptr;
-
-// Time of server startup for uptime calculation
 auto startupTime = std::chrono::steady_clock::now();
 
+static std::string jsonEscape(const std::string& input) {
+    std::ostringstream escaped;
+    for (char c : input) {
+        switch (c) {
+            case '"':  escaped << "\\\""; break;
+            case '\\': escaped << "\\\\"; break;
+            case '\b': escaped << "\\b"; break;
+            case '\f': escaped << "\\f"; break;
+            case '\n': escaped << "\\n"; break;
+            case '\r': escaped << "\\r"; break;
+            case '\t': escaped << "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                            << static_cast<int>(static_cast<unsigned char>(c)) << std::dec;
+                } else {
+                    escaped << c;
+                }
+        }
+    }
+    return escaped.str();
+}
+
 void signalHandler(int signum) {
-    std::cout << "\n[INFO] Interrupt signal (" << signum << ") received. Shutting down server..." << std::endl;
+    (void)signum;
     if (server) {
         server->stopServer();
     }
 }
 
 int main(int argc, char* argv[]) {
-    // Register signal handlers for graceful shutdown
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
@@ -33,13 +55,10 @@ int main(int argc, char* argv[]) {
 
     try {
         server = std::make_unique<HttpServer>("0.0.0.0", port, 4);
-
-        // 1. Set static files directory
         server->setStaticDirectory("./public");
 
-        // 2. Define custom API routes
-        // GET /api/status - Server health check and metrics
         server->route("GET", "/api/status", [](const HttpRequest& req) {
+            (void)req;
             auto now = std::chrono::steady_clock::now();
             auto uptimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - startupTime).count();
             double uptimeSec = uptimeMs / 1000.0;
@@ -48,20 +67,21 @@ int main(int argc, char* argv[]) {
             res.status = 200;
             res.statusMessage = "OK";
             res.headers["Content-Type"] = "application/json";
-            
+            res.headers["Cache-Control"] = "no-cache";
+
             std::ostringstream json;
-            json << "{\n"
+            json << std::fixed << std::setprecision(1)
+                 << "{\n"
                  << "  \"status\": \"healthy\",\n"
                  << "  \"uptime_seconds\": " << uptimeSec << ",\n"
-                 << "  \"thread_pool_workers\": 4,\n"
+                 << "  \"thread_pool_workers\": " << server->workerCount() << ",\n"
                  << "  \"version\": \"1.0.0\",\n"
-                 << "  \"engine\": \"Nexus C++ Engine\"\n"
+                 << "  \"engine\": \"Nexus C++ Engine (Linux epoll)\"\n"
                  << "}";
             res.body = json.str();
             return res;
         });
 
-        // GET /api/greet - Greeting API parsing query parameters
         server->route("GET", "/api/greet", [](const HttpRequest& req) {
             std::string name = "Guest";
             auto it = req.queryParams.find("name");
@@ -76,20 +96,18 @@ int main(int argc, char* argv[]) {
 
             std::ostringstream json;
             json << "{\n"
-                 << "  \"message\": \"Hello, " << name << "! Welcome to the C++ Web Server.\",\n"
-                 << "  \"query_param_received\": \"" << name << "\"\n"
+                 << "  \"message\": \"Hello, " << jsonEscape(name) << "! Welcome to the C++ Web Server.\",\n"
+                 << "  \"query_param_received\": \"" << jsonEscape(name) << "\"\n"
                  << "}";
             res.body = json.str();
             return res;
         });
 
-        // POST /api/echo - Echoes back the request body
         server->route("POST", "/api/echo", [](const HttpRequest& req) {
             HttpResponse res;
             res.status = 200;
             res.statusMessage = "OK";
-            
-            // Mirror content type or default to text/plain
+
             auto it = req.headers.find("content-type");
             if (it != req.headers.end()) {
                 res.headers["Content-Type"] = it->second;
@@ -97,15 +115,10 @@ int main(int argc, char* argv[]) {
                 res.headers["Content-Type"] = "text/plain; charset=utf-8";
             }
 
-            if (req.body.empty()) {
-                res.body = "No request body received.";
-            } else {
-                res.body = req.body;
-            }
+            res.body = req.body.empty() ? "No request body received." : req.body;
             return res;
         });
 
-        // Start server (blocking loop)
         server->start();
 
     } catch (const std::exception& e) {
