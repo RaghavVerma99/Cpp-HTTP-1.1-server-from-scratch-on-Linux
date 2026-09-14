@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <sstream>
 #include <cstring>
+#include <chrono>
+#include <optional>
+#include <regex>
 
 #include <unistd.h>
 #include <cerrno>
@@ -20,29 +23,44 @@
 namespace fs = std::filesystem;
 
 namespace {
-    constexpr int kReadBuffer = 16384;
-    constexpr size_t kMaxRequestBody = 8 * 1024 * 1024;
+constexpr int kReadBuffer = 16384;
+constexpr size_t kMaxRequestBody = 8 * 1024 * 1024;
 
-    std::mutex logMutex;
+std::mutex logMutex;
 
-    void log(const std::string& msg) {
-        std::lock_guard<std::mutex> lock(logMutex);
-        std::cout << msg << std::endl;
+void log(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(logMutex);
+    std::cout << msg << std::endl;
+}
+
+std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+        [](unsigned char c) { return std::tolower(c); });
+    return s;
+}
+
+HttpResponse errorResponse(int status, const std::string& statusMessage, const std::string& detail) {
+    HttpResponse res;
+    res.status = status;
+    res.statusMessage = statusMessage;
+    res.body = "<h1>" + std::to_string(status) + " " + statusMessage + "</h1><p>" + detail + "</p>";
+    res.headers["Content-Type"] = "text/html";
+    return res;
+}
+
+}  // namespace
+
+void HttpServer::checkIdleTimeouts() {
+    auto now = std::chrono::steady_clock::now();
+    std::vector<int> toClose;
+    for (const auto& [fd, conn] : connections) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn->lastActivity).count();
+        if (elapsed > kIdleTimeoutMs && !conn->taskInFlight) {
+            toClose.push_back(fd);
+        }
     }
-
-    std::string toLower(std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-            [](unsigned char c) { return std::tolower(c); });
-        return s;
-    }
-
-    HttpResponse errorResponse(int status, const std::string& statusMessage, const std::string& detail) {
-        HttpResponse res;
-        res.status = status;
-        res.statusMessage = statusMessage;
-        res.body = "<h1>" + std::to_string(status) + " " + statusMessage + "</h1><p>" + detail + "</p>";
-        res.headers["Content-Type"] = "text/html";
-        return res;
+    for (int fd : toClose) {
+        closeConnection(fd);
     }
 }
 
@@ -54,8 +72,61 @@ HttpServer::~HttpServer() {
 }
 
 void HttpServer::route(const std::string& method, const std::string& path, RouteHandler handler) {
-    std::string key = method + ":" + path;
-    routes[key] = std::move(handler);
+    RouteEntry entry;
+    entry.method = method;
+    entry.pattern = path;
+    entry.handler = std::move(handler);
+    entry.isRegex = false;
+    routes.push_back(std::move(entry));
+}
+
+void HttpServer::routeRegex(const std::string& method, const std::string& pattern, RouteHandler handler) {
+    RouteEntry entry;
+    entry.method = method;
+    entry.pattern = pattern;
+    entry.handler = std::move(handler);
+    entry.isRegex = true;
+    entry.regex = std::regex(pattern);
+    routes.push_back(std::move(entry));
+}
+
+std::optional<std::unordered_map<std::string, std::string>> HttpServer::matchRoute(const std::string& method, const std::string& path, RouteEntry& entry) {
+    if (entry.method != method) {
+        return std::nullopt;
+    }
+    if (entry.isRegex) {
+        std::smatch match;
+        if (std::regex_match(path, match, entry.regex)) {
+            std::unordered_map<std::string, std::string> params;
+            for (size_t i = 1; i < match.size(); ++i) {
+                params["$" + std::to_string(i)] = match[i].str();
+            }
+            return params;
+        }
+        return std::nullopt;
+    }
+    if (entry.pattern == path) {
+        return std::unordered_map<std::string, std::string>{};
+    }
+    std::vector<std::string> patternParts;
+    std::vector<std::string> pathParts;
+    std::stringstream ps(entry.pattern);
+    std::stringstream ss(path);
+    std::string pp, sp;
+    while (std::getline(ps, pp, '/')) patternParts.push_back(pp);
+    while (std::getline(ss, sp, '/')) pathParts.push_back(sp);
+    if (patternParts.size() != pathParts.size()) {
+        return std::nullopt;
+    }
+    std::unordered_map<std::string, std::string> params;
+    for (size_t i = 0; i < patternParts.size(); ++i) {
+        if (patternParts[i].size() > 0 && patternParts[i][0] == ':') {
+            params[patternParts[i].substr(1)] = pathParts[i];
+        } else if (patternParts[i] != pathParts[i]) {
+            return std::nullopt;
+        }
+    }
+    return params;
 }
 
 void HttpServer::setStaticDirectory(const std::string& dirPath) {
@@ -69,7 +140,10 @@ void HttpServer::createSocket() {
     }
 
     int opt = 1;
-    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        close(listenSocket);
+        throw std::runtime_error("setsockopt(SO_REUSEADDR) failed: " + std::string(std::strerror(errno)));
+    }
 }
 
 void HttpServer::bindAndListen() {
@@ -126,6 +200,9 @@ void HttpServer::start() {
 
     eventLoop();
 
+    log("[INFO] Draining in-flight connections...");
+    threadPool.shutdown();
+
     if (eventFd != -1) {
         close(eventFd);
         eventFd = -1;
@@ -143,7 +220,8 @@ void HttpServer::start() {
         close(listenSocket);
         listenSocket = -1;
     }
-    threadPool.shutdown();
+
+    log("[INFO] Server stopped.");
 
     log("[INFO] Server stopped.");
 }
@@ -152,6 +230,7 @@ void HttpServer::stopServer() {
     if (!running) {
         return;
     }
+    shutdownRequested = true;
     running = false;
 
     if (eventFd != -1) {
@@ -165,13 +244,17 @@ void HttpServer::setInterest(int fd, uint32_t events) {
     epoll_event ev{};
     ev.events = events;
     ev.data.fd = fd;
-    epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &ev);
+    if (epoll_ctl(epollFd, EPOLL_CTL_ADD, fd, &ev) < 0 && errno == EEXIST) {
+        epoll_ctl(epollFd, EPOLL_CTL_MOD, fd, &ev);
+    }
 }
 
 void HttpServer::eventLoop() {
     std::vector<epoll_event> events(64);
 
     while (running) {
+        checkIdleTimeouts();
+
         int n = epoll_wait(epollFd, events.data(), static_cast<int>(events.size()), -1);
         if (n < 0) {
             if (errno == EINTR) {
@@ -179,6 +262,12 @@ void HttpServer::eventLoop() {
             }
             std::cerr << "[ERROR] epoll_wait failed: " << std::strerror(errno) << std::endl;
             break;
+        }
+        if (n == 0) {
+            continue;
+        }
+        if (static_cast<size_t>(n) == events.size()) {
+            events.resize(events.size() * 2);
         }
 
         for (int i = 0; i < n; ++i) {
@@ -244,9 +333,12 @@ void HttpServer::acceptConnections() {
         }
 
         int one = 1;
-        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        if (setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0) {
+            std::cerr << "[WARNING] setsockopt(TCP_NODELAY) failed: " << std::strerror(errno) << std::endl;
+        }
 
         connections[client] = std::make_unique<Connection>(client);
+        connections[client]->lastActivity = std::chrono::steady_clock::now();
         epoll_event ev{};
         ev.events = EPOLLIN;
         ev.data.fd = client;
@@ -262,6 +354,7 @@ void HttpServer::readConnection(Connection& conn) {
         ssize_t n = recv(conn.fd, buffer, sizeof(buffer), 0);
         if (n > 0) {
             conn.inBuf.append(buffer, static_cast<size_t>(n));
+            conn.lastActivity = std::chrono::steady_clock::now();
             if (conn.inBuf.size() > kMaxRequestBody + 16 * 1024) {
                 closeConnection(conn.fd);
                 return;
@@ -342,6 +435,7 @@ void HttpServer::writeConnection(Connection& conn) {
                          MSG_NOSIGNAL);
         if (n > 0) {
             conn.outOffset += static_cast<size_t>(n);
+            conn.lastActivity = std::chrono::steady_clock::now();
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -385,6 +479,7 @@ void HttpServer::drainCompleted() {
         }
         Connection& conn = *it->second;
         conn.taskInFlight = false;
+        conn.lastActivity = std::chrono::steady_clock::now();
 
         if (conn.abandoned) {
             closeConnection(item.fd);
@@ -438,15 +533,20 @@ HttpResponse HttpServer::handleRequest(const HttpRequest& req) {
         return errorResponse(501, "Not Implemented", "Transfer-Encoding is not supported.");
     }
 
-    std::string routeKey = req.method + ":" + req.path;
-    auto routeIt = routes.find(routeKey);
-    if (routeIt != routes.end()) {
-        try {
-            res = routeIt->second(req);
-        } catch (const std::exception& e) {
-            return errorResponse(500, "Internal Server Error", std::string(e.what()));
+    for (auto& entry : routes) {
+        auto params = matchRoute(req.method, req.path, entry);
+        if (params.has_value()) {
+            HttpRequest modifiedReq = req;
+            modifiedReq.routeParams = params.value();
+            try {
+                res = entry.handler(modifiedReq);
+            } catch (const std::exception& e) {
+                return errorResponse(500, "Internal Server Error", std::string(e.what()));
+            }
+            goto found;
         }
-    } else if ((req.method == "GET" || req.method == "HEAD") && !staticDir.empty()) {
+    }
+    if ((req.method == "GET" || req.method == "HEAD") && !staticDir.empty()) {
         res = serveStatic(req.path);
         if (req.method == "HEAD") {
             res.contentLengthHint = static_cast<int64_t>(res.body.size());
@@ -455,7 +555,7 @@ HttpResponse HttpServer::handleRequest(const HttpRequest& req) {
     } else {
         return errorResponse(404, "Not Found", "The requested route does not exist.");
     }
-
+found:
     log("[RESPONSE] " + std::to_string(res.status) + " " + res.statusMessage
         + " for " + req.method + " " + req.path);
 
@@ -510,6 +610,7 @@ HttpResponse HttpServer::serveStatic(const std::string& path) {
         res.body = buffer.str();
         res.status = 200;
         res.statusMessage = "OK";
+        res.contentLengthHint = static_cast<int64_t>(res.body.size());
         res.headers["Content-Type"] = MimeTypes::getType(canonicalTarget.string());
         return res;
     } catch (const std::exception& e) {

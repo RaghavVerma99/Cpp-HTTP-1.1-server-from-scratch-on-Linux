@@ -1,403 +1,646 @@
 # ⚡ Nexus HTTP Server
 
-> A dependency-free HTTP/1.1 web server in C++20, built directly on Linux
-> kernel primitives: `epoll`, `eventfd`, and non-blocking POSIX sockets.
-> Zero libraries. Zero abstractions. Just syscalls.
+> A dependency-free HTTP/1.1 web server written in C++20 from scratch.
+> Built entirely on Linux kernel primitives — `epoll`, `eventfd`, and non-blocking POSIX sockets.
+> No frameworks. No external libraries. Just the kernel and the C++ standard library.
 
 ---
 
 ## 📑 Table of Contents
 
-- [Tech Stack](#-tech-stack)
-- [What It Does](#-what-it-does)
-- [Why: Design Goals](#-why-design-goals)
-- [Architecture](#-architecture)
-- [How: Implementation](#-how-implementation)
-- [Build](#-build)
-- [Run](#-run)
-- [API Reference](#-api-reference)
-- [Project Layout](#-project-layout)
-- [Limitations / Future Work](#-limitations--future-work)
+1. [What Is This?](#what-is-this)
+2. [What It Does](#what-it-does)
+3. [Why This Exists](#why-this-exists)
+4. [How It Works](#how-it-works)
+5. [Architecture Overview](#architecture-overview)
+6. [The Request Lifecycle](#the-request-lifecycle)
+7. [Core Concepts Explained](#core-concepts-explained)
+8. [Per-Connection State](#per-connection-state)
+9. [Building](#building)
+10. [Running](#running)
+11. [API Reference](#api-reference)
+12. [How to Add Your Own Routes](#how-to-add-your-own-routes)
+13. [Project Layout](#project-layout)
+14. [Known Limitations](#known-limitations)
+15. [What Was Fixed](#what-was-fixed)
 
 ---
 
-## 🧰 Tech Stack
+## 🧭 What Is This?
 
-| Layer | Choice | Why it matters |
-| --- | --- | --- |
-| **Language** | C++20 | Native speed, RAII for cleanup, and `std::string` / `std::filesystem` so there's no need for third-party libraries |
-| **Event loop** | `epoll` (level-triggered) | The Linux way to watch thousands of sockets from one thread and only act when a socket actually has data |
-| **Sockets** | Non-blocking `accept4` / `recv` / `send` | Calls never block; if there's nothing to read the call returns immediately and the loop moves on |
-| **Wakeup channel** | `eventfd` | A thread-safe "nudge" so worker threads can tell the event loop *a response is ready* without touching socket internals |
-| **Concurrency** | Worker pool of 4 threads (`std::thread` + condition variable) | Slow work (parsing, disk reads) happens off the event loop so one slow request never stalls everyone else |
-| **Static serving** | `std::filesystem` + `ifstream` | Canonical path resolution for traversal safety; MIME type lookup by file extension |
-| **Build** | Makefile / CMake / Docker | It compiles with a single `g++` command; the only thing linked beyond the standard library is `pthread` |
+Nexus is a **complete HTTP/1.1 web server** written entirely in C++20.
+If you've ever wondered what happens behind the scenes when you type `http://localhost:8080` in your browser, this project shows you every single step.
 
-**In simple terms:** the day-to-day plumbing of this project is just the
-Linux kernel (`epoll`, sockets) plus the C++ standard library. Nothing else.
-It's a good way to see what "high performance" actually means at the
-systems level, because everything is right here in plain sight.
+Instead of using a ready-made framework like Boost.Asio or libevent, Nexus talks directly to the Linux kernel. It uses:
+
+- **`epoll`** to watch thousands of connections at once with minimal overhead
+- **`eventfd`** as a safe signal channel between worker threads and the main loop
+- **Non-blocking sockets** so no single slow client can stall the entire server
+- **A thread pool** to handle CPU-heavy work like parsing and file reads without blocking the event loop
+
+**In one sentence:** one thread watches all the doors (the event loop), a small team of workers handles the hard stuff (parsing, routing, file I/O), and everything communicates through safe, kernel-managed channels.
 
 ---
 
 ## 📌 What It Does
 
-Nexus is a working HTTP/1.1 web server. Concretely, each step of the
-request lifecycle is handled from scratch:
+When a client (browser, `curl`, any HTTP tool) connects to Nexus, here's exactly what happens:
 
-1. **Listens** on a configurable port and accepts incoming connections.
-2. **Reads** request bytes off the socket as they arrive.
-3. **Parses** the request into usable pieces: method, path, query string,
-   headers, and body.
-4. **Routes** the parsed request — either to a C++ handler you registered,
-   or to a static file in `public/`.
-5. **Serializes** a proper HTTP response with `Content-Length`, `Date`, and
-   `Server` headers.
-6. **Writes** the response back, then keeps the connection open for the
-   next request (keep-alive).
+```
+Client sends request
+       ↓
+  Accept the connection
+       ↓
+  Read the raw bytes from the socket
+       ↓
+  Parse the HTTP request (method, path, headers, body)
+       ↓
+  Look up a matching route handler
+       ↓
+  Run the handler (or serve a static file)
+       ↓
+  Build a proper HTTP response
+       ↓
+  Send the response back to the client
+       ↓
+  Keep the connection open OR close it
+```
 
-It also tolerates the messy parts of the real world: bare `\n` line
-endings, pipelined requests queued on one connection, oversized bodies
-(`413`), `HEAD` requests, and path traversal attempts (`403`).
+It handles the messy parts of real-world HTTP too:
 
----
-
-## 🎯 Why: Design Goals
-
-These three goals drove every decision in the code:
-
-| Goal | Consequence |
+| Scenario | What Nexus Does |
 | --- | --- |
-| **Serve many connections with few threads** | A single event-loop thread owns *all* I/O. Nobody spawns a thread per connection, because an idle keep-alive client would waste a whole thread (and its 8 MB stack) just waiting. |
-| **Never block the loop on slow work** | Parsing, routing, and file I/O run on a bounded worker pool. The loop only does fast things: `recv`, `send`, and bookkeeping. |
-| **Stay dependency-free and readable** | Every line is system-level code you can step through in a debugger. No framework hides what's happening. |
-
-**In simple terms:** the classic beginner server answers one visitor at a
-time. That's fine until one visitor stalls and everyone behind them waits.
-Nexus splits the job — one person watching all the doors, a few people
-doing the actual fetching — so nobody waits on anyone else.
+| Bare `\n` line endings (not `\r\n`) | Handles it gracefully |
+| Multiple requests on one connection (pipelining) | Processes them in order |
+| Request body too large | Returns `413 Payload Too Large` immediately |
+| `HEAD` request (no body needed) | Returns headers only, no body sent |
+| Path traversal attempt (`../`) | Returns `403 Forbidden` |
+| Unknown route | Returns `404 Not Found` |
+| Idle keep-alive connection | Closes after 30 seconds of no activity |
 
 ---
 
-## 🏗️ Architecture
+## 🎯 Why This Exists
 
-Nexus is organized into two halves that talk to each other through a task queue.
+Three design goals shaped every decision:
 
-- **The I/O plane (1 thread):** the *event loop*. It watches every open
-  socket with `epoll_wait`. When a socket is readable it reads the bytes;
-  when a full request is assembled it sends that request to a worker.
-  When a worker delivers a finished response, the loop writes it out.
-- **The compute plane (4 worker threads):** the *doers*. They parse the
-  request, resolve the route or open the file, produce the `HttpResponse`,
-  serialize it to a string, and hand it back.
-
-```
-                  ┌─────────────────────────────────────────────┐
-   connections ──►│           I/O PLANE (1 thread)              │
-    epoll_wait    │  accept4 ─► recv ─► extract() ─► dispatch   │
-                  │                    │              │         │
-                  │                    │    complete request     │
-                  │                    ▼              │         │
-                  │              task queue ◄─────────┤         │
-                  └───────────────────┬───────────────┘─────────┘
-                                      │ enqueue
-                                      ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │              COMPUTE PLANE (worker pool, N=4)               │
-   │  parse(req) ─► route / serveStatic ─► serialize response     │
-   └──────────────┬──────────────────────────────────────────────┘
-                  │ eventfd write(1) ──► wakeup
-                  ▼
-   ┌─────────────────────────────────────────────────────────────┐
-   │  drainCompleted ─► set EPOLLOUT ─► send(outBuf) ─► re-arm    │
-   └─────────────────────────────────────────────────────────────┘
-```
-
-### The three key ideas, explained simply
-
-**`epoll` — watching many doors at once.**
-Normally reading a socket is one-at-a-time: you ask, you wait, you get.
-`epoll` flips it around — you say "tell me when any of these sockets has
-something for me," and the kernel answers with only the sockets that are
-ready. One thread can then service thousands of connections. That single
-`recv`-only-once-ready property is why the server stays snappy under load.
-
-**`eventfd` — the "ping" between workers and the loop.**
-Workers live on their own threads. To hand a completed response back they
-can't just poke the loop's data structures safely. Instead they increment
-a tiny kernel counter (`write(eventfd, 1)`), which wakes `epoll_wait`. The
-loop then drains whatever responses have piled up. Simple, atomic, and
-deadlock-free.
-
-**The worker pool — bounded parallelism.**
-Parsing, route lookup, and file reads are CPU/disk work. Doing that on the
-loop thread would stop new `recv`s from happening. Instead, complete
-requests are queued and a fixed set of 4 workers consumes them. Bounded
-pool = bounded memory, no thread explosion, and the loop never blocks.
-
-### Request lifecycle (sequence diagram)
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant E as Event loop
-    participant W as Worker pool
-    participant H as Handler / Filesystem
-
-    C->>E: connect + send request
-    E->>E: accept4, TCP_NODELAY, EPOLLIN
-    E->>E: recv() → inBuf
-    E->>E: HttpParser::extract(inBuf)
-    alt request complete
-        E->>W: enqueue {fd, request}
-        W->>H: route handler / static file
-        H-->>W: HttpResponse
-        W->>E: enqueueCompleted + write(eventfd)
-        E->>C: send() serialized response
-    else request incomplete
-        E->>E: wait for more EPOLLIN
-    end
-    alt keep-alive
-        E->>E: EPOLLIN re-armed, next request
-    else Connection: close
-        E->>C: FIN
-    end
-```
-
-### Per-connection state
-
-Every accepted socket carries a small state struct (`include/Connection.hpp`):
-
-| Field | Role |
+| Goal | What It Means in Practice |
 | --- | --- |
-| `inBuf` | Bytes received but not yet parsed into a request |
-| `outBuf` / `outOffset` | The serialized response, and how much has been sent so far |
-| `keepAlive` | Whether to watch for a next request after this response flushes |
-| `taskInFlight` | True while a worker is busy with this connection — stops two requests being dispatched at once |
-| `peerClosed` | The client sent FIN; deliver the response, then close |
-| `abandoned` | The connection died while a task was in flight — defer `close()` until the response is drained |
+| **Serve many connections with few threads** | One thread watches all sockets. No thread-per-connection model wasting 8 MB of stack memory per idle client. |
+| **Never block the main loop** | Parsing, routing, and reading files happen on worker threads. The main loop only does fast I/O (`recv`, `send`). |
+| **Be readable and debuggable** | Every line is standard C++20 and Linux syscalls. You can step through it in GDB without jumping through abstraction layers. |
 
-**Why `taskInFlight` exists:** an fd must never be closed while a worker is
-still using it. If a client disconnects mid-request and the loop closed
-that fd (and `accept4` handed the *same number*) to a brand-new connection,
-the worker's finished response would be written into someone else's stream.
-`taskInFlight` + `abandoned` make the close wait until the dust settles.
+**The old way vs. Nexus:**
+
+```
+Traditional beginner server:
+  Client 1 → handle → Client 2 → handle → Client 3 → handle
+  (one at a time, everyone waits)
+
+Nexus:
+  [Event Loop Thread] ← watches ALL clients simultaneously
+       ↓
+  [Worker 1]  ← handles request A
+  [Worker 2]  ← handles request B
+  [Worker 3]  ← handles request C
+  [Worker 4]  ← handles request D
+  (everyone served at the same time)
+```
 
 ---
 
-## ⚙️ How: Implementation
+## 🏗️ Architecture Overview
 
-Each step below shows the core idea, the actual code, and what it achieves.
+Nexus is split into two halves that communicate through a shared task queue.
 
-### 1. The listener — one non-blocking socket
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        CLIENTS (browsers, curl, etc.)           │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ sockets
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              THE I/O PLANE (1 event loop thread)                │
+│                                                                 │
+│   accept4()  →  recv()  →  HttpParser::extract()  →  dispatch() │
+│                                                                 │
+│   When a request is ready:                                      │
+│     → send it to a worker thread via the task queue             │
+│                                                                 │
+│   When a response arrives:                                      │
+│     → write it back to the socket                               │
+│     → keep the connection open (if keep-alive)                  │
+│                                                                 │
+└──────────────────────┬──────────────────────────────────────────┘
+                       │ task queue (std::queue + mutex)
+                       │ eventfd (wake-up signal)
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│            THE COMPUTE PLANE (4 worker threads)                  │
+│                                                                 │
+│   Worker 1:  parse(req) → route handler → serialize response   │
+│   Worker 2:  parse(req) → static file → serialize response     │
+│   Worker 3:  parse(req) → route handler → serialize response   │
+│   Worker 4:  parse(req) → static file → serialize response     │
+│                                                                 │
+│   When done: write(eventfd, 1) → wakes the event loop          │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-The socket is created non-blocking and close-on-exec, with `SO_REUSEADDR`
-so a quick restart doesn't fail with `Address already in use`:
+### The Three Pillars
+
+#### 1. `epoll` — The Multiplexer
+
+Think of `epoll` as a security guard watching 100 doors at once. Instead of walking to each door every second to check if someone's there (which wastes time), the guard stands still and only moves when the doorbell rings.
+
+```cpp
+// The loop waits for ANY socket to have data ready
+int n = epoll_wait(epollFd, events.data(), size, -1);
+// n = 0 means "nothing happened, keep waiting"
+// n > 0 means "these sockets need attention"
+```
+
+This is why one thread can handle thousands of connections — it never wastes time checking sockets that have nothing to say.
+
+#### 2. `eventfd` — The Ping Between Threads
+
+Worker threads live on their own threads and can't safely touch the event loop's data structures. So instead of sharing memory, they send a tiny signal:
+
+```cpp
+// Worker: "Hey, I'm done!"
+uint64_t one = 1;
+write(eventFd, &one, sizeof(one));
+
+// Event loop: wakes up, drains completed responses
+read(eventFd, &count, sizeof(count));
+```
+
+It's like a doorbell — the worker pushes the button, the loop comes to collect.
+
+#### 3. The Thread Pool — Bounded Parallelism
+
+A fixed number of worker threads (default: 4) ensures that if 100 clients connect at once, only 4 requests are processed at a time. This prevents memory explosion and keeps the system predictable.
+
+---
+
+## 🔄 The Request Lifecycle
+
+Here's what happens from the moment a client connects to when they get a response:
+
+```
+  Client                                          Nexus Server
+   │                                                    │
+   │──── TCP SYN ──────────────────────────────────────►│
+   │                                                    │ accept4()
+   │◄─── TCP SYN-ACK ─────────────────────────────────│
+   │                                                    │ EPOLLIN registered
+   │──── HTTP GET /api/status ────────────────────────►│
+   │                                                    │ recv() → inBuf
+   │                                                    │ HttpParser::extract()
+   │                                                    │ → Request parsed!
+   │                                                    │ dispatch() → task queue
+   │                                                    │ Worker picks it up
+   │                                                    │ → route handler runs
+   │                                                    │ → HttpResponse created
+   │                                                    │ serialize to string
+   │                                                    │ write(eventfd, 1)
+   │                                                    │
+   │◄─── HTTP/1.1 200 OK ─────────────────────────────│
+   │                                                    │ send(outBuf)
+   │                                                    │
+   │──── (connection stays open for next request)       │
+```
+
+### Step-by-step breakdown:
+
+**Step 1 — The Listener**
+
+One non-blocking socket sits and waits for incoming connections.
 
 ```cpp
 listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
 setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 bind(listenSocket, ...);
 listen(listenSocket, SOMAXCONN);
-epoll_ctl(epollFd, EPOLL_CTL_ADD, listenSocket, &ev);   // watch for EPOLLIN
 ```
 
-**What it achieves:** one descriptor represents "the front door"; the
-kernel tells us when a visitor has arrived, and `acceptConnections()` loops
-on `accept4` until `EAGAIN`, grabbing everyone waiting.
+`SO_REUSEADDR` means if you restart the server quickly, you won't get "Address already in use" errors.
 
-### 2. The event loop — react to what's ready
+**Step 2 — The Event Loop**
 
-`epoll_wait` returns only the descriptors that need attention:
+The loop sits idle until the kernel says something needs attention:
 
 ```cpp
 int n = epoll_wait(epollFd, events.data(), events.size(), -1);
-for (auto& e : events) {
-    if (e.data.fd == listenSocket)   acceptConnections();
-    else if (e.data.fd == eventFd)   drainCompleted();
-    else                             read/write the connection;
-}
 ```
 
-There are exactly three sources of events, and everything else in the
-program is completely idle until the kernel reports them. This is the
-heart of "one thread, many connections."
+Three types of events can fire:
+- **Listen socket has a new connection** → `acceptConnections()`
+- **Worker sent a completed response** → `drainCompleted()`
+- **A client socket has data to read** → `readConnection()`
 
-### 3. Incremental parsing — headers first, body only when complete
+**Step 3 — Incremental Parsing**
 
-The parser first locates the header terminator, then decides how big the
-body must be. Important consequences: incomplete requests (no body yet)
-return `{false, 0}` and the loop just keeps reading; an over-sized declared
-body is refused immediately with a 413 *before* megabytes are buffered.
+The parser reads the raw bytes and finds the boundary between headers and body:
 
-```cpp
-size_t headerEnd = buf.find("\r\n\r\n");            // bare "\n\n" also works
-if (headerEnd == npos) return {false, 0};           // not enough data yet
-size_t bodyLen = stoull(contentLength);
-if (bodyLen > maxBody) return {true, ...};          // caller answers 413
-if (used + bodyLen > buf.size()) return {false, 0}; // body has not arrived
+```
+GET /api/status HTTP/1.1\r\n
+Host: localhost:8080\r\n
+Connection: keep-alive\r\n
+\r\n
+<body (if present)>
 ```
 
-### 4. Dispatch to the worker pool — hand off, don't block
+- If the headers are complete but the body hasn't arrived → **wait for more data**
+- If the body is too large → **return 413 immediately**
+- If everything is here → **return the full request**
 
-When a request is complete the loop erases its bytes, marks the connection
-busy, and hands the work to the pool. The worker runs the handler, then
-wakes the loop through the `eventfd`:
+**Step 4 — Dispatch to Workers**
+
+The event loop hands the request to a worker thread and goes back to watching sockets:
 
 ```cpp
-conn.inBuf.erase(0, used);
-conn.taskInFlight = true;
 threadPool.enqueue([this, fd, keepAlive, req = std::move(req)]() {
     HttpResponse res = handleRequest(req);
-    res.headers["Connection"] = keepAlive ? "keep-alive" : "close";
-    enqueueCompleted(fd, res.toString());            // write(eventfd)
+    enqueueCompleted(fd, res.toString());
 });
 ```
 
-The lambda captures the connection's fd and the parsed request by value —
-the loop is free to keep serving other connections while the worker works.
+The loop is now free to serve other clients while the worker does the parsing and routing.
 
-### 5. Static files — served safely
+**Step 5 — Write the Response**
 
-The requested path is canonicalized and verified to resolve strictly
-inside the static root. Paths that climb out with `..` resolve to `..`
-components and are refused with a 403:
+When the worker finishes, it signals the loop via `eventfd`. The loop then writes the serialized HTTP response back to the socket.
 
-```cpp
-fs::path targetPath = fs::canonical(baseDir / relPath.substr(1));
-for (auto& c : fs::relative(targetPath, baseDir))
-    if (c == "..") return errorResponse(403, "Forbidden", ...);
-```
+**Step 6 — Keep-Alive or Close**
 
-The response's `Content-Type` is inferred from the file extension via
-`MimeTypes::getType`, and binary files are read without corruption
-(`std::ios::binary`).
-
-### 6. Example routes — how to add an API
-
-Routes are matched exactly on method + path and call a handler that maps a
-`HttpRequest` to an `HttpResponse`:
-
-```cpp
-server->route("GET", "/api/greet", [](const HttpRequest& req) {
-    HttpResponse res;
-    res.headers["Content-Type"] = "application/json";
-
-    std::string name = req.queryParams.count("name") ? req.queryParams.at("name")
-                                                     : "Guest";
-    res.body = R"({"message": "Hello, )" + jsonEscape(name) + R"(..."})";
-    return res;
-});
-```
-
-`jsonEscape` guarantees user input is data, not markup: a query value of
-`<script>alert(1)</script>` is JSON-escaped before being placed in the
-response body, so it can never execute in a browser.
+If the client said `Connection: keep-alive`, the loop re-arms the socket for more requests. Otherwise, it closes the connection cleanly.
 
 ---
 
-## 🛠️ Build
+## 🧠 Core Concepts Explained Simply
 
-Requires **Linux**, a C++20 compiler (GCC ≥ 11 / Clang ≥ 14), and `make`
-or CMake ≥ 3.16.
+### Non-Blocking Sockets
 
+Normally, `recv()` would freeze your program until data arrives. With non-blocking sockets, `recv()` returns immediately — either with data, or with an error saying "nothing here yet." This lets the loop check dozens of sockets in a row without ever getting stuck.
+
+```
+Blocking:   recv() ──→ [waits forever] ──→ data!
+Non-blocking: recv() ──→ "EAGAIN, try again later" ──→ move on to next socket
+```
+
+### Level-Triggered vs Edge-Triggered epoll
+
+Nexus uses **level-triggered** epoll. This means: "as long as there's data in the socket buffer, keep telling me." It's simpler and more forgiving — if you miss a notification, you'll get another one next time you call `epoll_wait`.
+
+### Connection State Machine
+
+Each connection goes through these states:
+
+```
+┌──────────┐
+│  CONNECT  │  ← Client just connected
+└────┬─────┘
+     │ recv() got data
+     ▼
+┌──────────┐
+│  PARSING  │  ← Waiting for complete request
+└────┬─────┘
+     │ Request is complete
+     ▼
+┌──────────┐
+│  WORKING  │  ← Worker is processing
+└────┬─────┘
+     │ Worker finished
+     ▼
+┌──────────┐
+│ SENDING  │  ← Writing response to socket
+└────┬─────┘
+     │ Response fully sent
+     ▼
+┌──────────┐
+│  DONE    │  → Keep-alive? → back to PARSING
+│          │  → Close? → close the socket
+└──────────┘
+```
+
+### The `taskInFlight` Guard
+
+An fd (file descriptor) must never be closed while a worker thread is still using it. If a client disconnects mid-request and the loop immediately closes that fd, the OS could hand the same fd number to a brand-new connection. The worker's finished response would then accidentally be written into the new connection's stream.
+
+`taskInFlight` prevents this: the loop marks the connection busy while a worker is processing, and won't close it until the worker is done.
+
+---
+
+## 📊 Per-Connection State
+
+Every accepted socket carries a small `Connection` struct that tracks everything about that client:
+
+| Field | Type | What It Does |
+| --- | --- | --- |
+| `fd` | `int` | The socket file descriptor |
+| `inBuf` | `string` | Bytes received but not yet parsed into a full request |
+| `outBuf` | `string` | The serialized response waiting to be sent |
+| `outOffset` | `size_t` | How many bytes of `outBuf` have already been sent |
+| `keepAlive` | `bool` | Whether to watch for a next request after this response |
+| `taskInFlight` | `bool` | True while a worker is processing this connection |
+| `peerClosed` | `bool` | The client sent a FIN (they're done) — deliver response then close |
+| `abandoned` | `bool` | The connection died mid-request — defer close until response is drained |
+| `lastActivity` | `time_point` | When the client last sent data or received data (for idle timeout) |
+
+---
+
+## 🛠️ Building
+
+### Prerequisites
+
+- **Linux** (the server uses Linux-specific syscalls: `epoll`, `eventfd`, `accept4`)
+- **C++20 compiler** (GCC ≥ 11 or Clang ≥ 14)
+- **`make`** or **CMake ≥ 3.16**
+- **`pthread`** (linked automatically)
+
+### Build Options
+
+**Using Make (simplest):**
 ```bash
-# Makefile
-make                          # → ./nexus-server
+make              # Compiles → ./nexus-server
+make run          # Compiles and runs on port 8080
+make clean        # Removes the binary
+```
 
-# or CMake
+**Using CMake:**
+```bash
 cmake -B build -S .
 cmake --build build -j
 ```
 
-Under the hood it's a single compilation — no packages to install:
-
+**Direct compilation (for debugging):**
 ```bash
 g++ -std=c++20 -O3 -Wall -Wextra -Iinclude src/main.cpp src/HttpServer.cpp -o nexus-server
 ```
 
+### Docker Build
+```bash
+docker build -t nexus-server .
+docker run -p 8080:8080 nexus-server
+```
+
 ---
 
-## ▶️ Run
+## ▶️ Running
 
 ```bash
 ./nexus-server [port]     # port defaults to 8080
 ```
 
-| Signal | Behavior |
+| Signal | What Happens |
 | --- | --- |
-| `SIGINT` / `SIGTERM` | A `write(eventfd)` wakes the loop → the loop drains in-flight work, closes every fd, shuts the workers down, exits 0 |
+| `Ctrl+C` (SIGINT) | Server stops accepting new connections, finishes in-flight requests, closes everything gracefully, exits cleanly |
+| `kill` (SIGTERM) | Same graceful shutdown as above |
 
-Then open <http://localhost:8080>. The served dashboard includes a live
-latency benchmark button (100 requests to `/api/status`) and an API
-playground for the endpoints below — a good way to watch the server work.
+The server prints startup info to the console:
+```
+[INFO] HTTP Server started on http://localhost:8080
+[INFO] Event loop: Linux epoll + non-blocking sockets.
+[INFO] Thread pool size: 4 workers.
+[INFO] Serving static files from: ./public
+```
+
+Open your browser to `http://localhost:8080` and you'll see the live dashboard with metrics, a benchmark tool, and an API playground.
 
 ---
 
 ## 📡 API Reference
 
-| Endpoint | Method | Description |
-| --- | --- | --- |
-| `/` | `GET` / `HEAD` | Static dashboard (HTML/CSS/JS) |
-| `/api/status` | `GET` | Health, uptime, worker count, version |
-| `/api/greet?name=<x>` | `GET` | JSON greeting with escaped query param |
-| `/api/echo` | `POST` | Returns the request body |
+### Built-in Endpoints
+
+| Endpoint | Method | Description | Example Response |
+| --- | --- | --- | --- |
+| `/` | `GET` / `HEAD` | Serves the dashboard HTML page | Full HTML page |
+| `/api/status` | `GET` | Health check — uptime, worker count, version | `{"status":"healthy","uptime_seconds":12.4,"thread_pool_workers":4}` |
+| `/api/greet?name=X` | `GET` | Personalized greeting | `{"message":"Hello, X! Welcome..."}` |
+| `/api/user/:id` | `GET` | Named route parameter — extracts `id` from URL | `{"user_id":"42","message":"User profile for 42"}` |
+| `/api/search?q=X` | `GET` | Query parameter — extracts `q` from URL | `{"query":"X","results":[]}` |
+| `/api/echo` | `POST` | Echoes back whatever body you send | Whatever you posted |
+| `/api/regex/\d+` | `GET` | Regex route — matches numeric paths only | `{"matched":"numeric path"}` |
+
+### Try it with curl:
 
 ```bash
-curl localhost:8080/api/status
-# → {"status":"healthy","uptime_seconds":12.4,"thread_pool_workers":4,"version":"1.0.0"}
+# Health check
+curl http://localhost:8080/api/status
 
-curl 'localhost:8080/api/greet?name=Alex'
-# → {"message":"Hello, Alex! Welcome to the C++ Web Server.","query_param_received":"Alex"}
+# Personalized greeting
+curl 'http://localhost:8080/api/greet?name=Raghav'
 
-curl -X POST -d '{"key":"value"}' localhost:8080/api/echo
-# → {"key":"value"}
+# Route parameter
+curl http://localhost:8080/api/user/42
+
+# Query parameter
+curl 'http://localhost:8080/api/search?q=hello'
+
+# POST echo
+curl -X POST -d '{"key":"value"}' http://localhost:8080/api/echo
+
+# Regex route
+curl http://localhost:8080/api/regex/123
+
+# Static file (dashboard)
+curl http://localhost:8080/
 ```
 
-Anything that isn't a registered route falls through to the static root
-(`public/`): a missing file is a `404`, a path that escapes the root is a
-`403`, and a `POST` with no matching route is a `404`.
+### Error Codes
+
+| Code | Meaning | When It Happens |
+| --- | --- | --- |
+| `400` | Bad Request | Request couldn't be parsed |
+| `403` | Forbidden | Path tried to escape the static root |
+| `404` | Not Found | Route doesn't exist and no static file matches |
+| `413` | Payload Too Large | Request body exceeds 8 MB limit |
+| `500` | Internal Server Error | Handler threw an exception |
+| `501` | Not Implemented | Transfer-Encoding is not supported |
+
+---
+
+## 🛠️ How to Add Your Own Routes
+
+### Simple Exact Match Route
+
+```cpp
+server->route("GET", "/api/hello", [](const HttpRequest& req) {
+    HttpResponse res;
+    res.status = 200;
+    res.headers["Content-Type"] = "text/plain";
+    res.body = "Hello, world!";
+    return res;
+});
+```
+
+### Named Route Parameter
+
+Use `:param` in the path to capture a segment:
+
+```cpp
+server->route("GET", "/api/user/:id", [](const HttpRequest& req) {
+    std::string userId = req.routeParams.at("id");  // "42" from /api/user/42
+    HttpResponse res;
+    res.body = "User ID: " + userId;
+    return res;
+});
+```
+
+### Regex Route
+
+For complex patterns, use regex matching:
+
+```cpp
+server->routeRegex("GET", R"(/api/v\d+/users)", [](const HttpRequest& req) {
+    HttpResponse res;
+    res.body = "Matched a versioned API route!";
+    return res;
+});
+// Matches: /api/v1/users, /api/v2/users, etc.
+```
+
+### Query Parameters
+
+Query strings are automatically parsed and available in `req.queryParams`:
+
+```cpp
+server->route("GET", "/api/search", [](const HttpRequest& req) {
+    std::string q = "all";
+    auto it = req.queryParams.find("q");
+    if (it != req.queryParams.end()) {
+        q = it->second;
+    }
+    HttpResponse res;
+    res.body = "Searching for: " + q;
+    return res;
+});
+// /api/search?q=cat → "Searching for: cat"
+```
+
+### POST Requests
+
+The request body is available in `req.body`:
+
+```cpp
+server->route("POST", "/api/echo", [](const HttpRequest& req) {
+    HttpResponse res;
+    res.body = req.body;  // Echo back whatever was sent
+    return res;
+});
+```
+
+### JSON Safety
+
+Always escape user input before putting it in JSON:
+
+```cpp
+std::string jsonEscape(const std::string& input);  // Provided in main.cpp
+// Prevents injection: <script>alert(1)</script> becomes a safe string
+```
 
 ---
 
 ## 📁 Project Layout
 
 ```
+HTTP-Server-in-C/
 ├── include/
-│   ├── Connection.hpp      # per-connection state (buffers, keep-alive, in-flight guard)
-│   ├── HttpParser.hpp      # incremental parser + URL decoding
-│   ├── HttpRequest.hpp     # request model (method/path/headers/body/query)
-│   ├── HttpResponse.hpp    # response serialization (Content-Length / Date / Server)
-│   ├── HttpServer.hpp      # event loop + routing declarations
-│   ├── MimeTypes.hpp       # extension → Content-Type map
-│   └── ThreadPool.hpp      # bounded worker pool
+│   ├── Connection.hpp      # Per-connection state: buffers, keep-alive, idle timeout
+│   ├── HttpParser.hpp      # Parses raw bytes into HTTP requests, URL decoding
+│   ├── HttpRequest.hpp     # Request model: method, path, headers, body, query params, route params
+│   ├── HttpResponse.hpp    # Response model: status, headers, body, automatic Content-Length
+│   ├── HttpServer.hpp      # Main server class: event loop, routing, thread pool
+│   ├── MimeTypes.hpp       # File extension → Content-Type mapping
+│   └── ThreadPool.hpp      # Fixed-size worker thread pool with task queue
 ├── src/
-│   ├── HttpServer.cpp      # sockets, epoll, dispatch, static files, errors
-│   └── main.cpp            # wiring, routes, signals, JSON escaping
-├── public/                 # static web root (the dashboard)
-├── CMakeLists.txt          # CMake build
-├── Dockerfile              # multi-stage container build
-├── Makefile                # make / make run / make clean
-└── nexus-server            # compiled binary
+│   ├── HttpServer.cpp      # Socket setup, epoll loop, dispatch, static file serving, route matching
+│   └── main.cpp            # Routes, signal handlers, JSON escaping, entry point
+├── public/
+│   └── index.html          # Live dashboard with metrics, benchmark tool, and API playground
+├── CMakeLists.txt           # CMake build configuration
+├── Dockerfile               # Multi-stage Docker build
+├── Makefile                 # make / make run / make clean
+└── nexus-server             # Compiled binary (generated)
 ```
 
----
+### File Responsibilities
 
-## ⏭️ Limitations / Future Work
-
-Honest assessment of what this project isn't yet:
-
-- **No idle timeouts** — a perfectly still keep-alive client holds an fd
-  (and its slot in the connection table) forever.
-- **No TLS / HTTP/2** — traffic is plain HTTP/1.1; HTTPS belongs to a
-  reverse proxy in front of it.
-- **Whole files are buffered** — a large static file is read fully into
-  memory rather than streamed with `sendfile`.
-- **No config file** — port, workers, routes, and static root are baked
-  into `src/main.cpp`.
-- **No automated tests** — the parser edge cases (bare `\n`, chunked,
-  giant `Content-Length`) would benefit from a test suite.
+| File | Role |
+| --- | --- |
+| `HttpServer.hpp/cpp` | The brain — creates sockets, runs the event loop, dispatches to workers |
+| `HttpParser.hpp` | The translator — turns raw bytes into structured request data |
+| `HttpRequest.hpp` | The request model — holds method, path, headers, body, params |
+| `HttpResponse.hpp` | The response model — serializes to proper HTTP wire format |
+| `Connection.hpp` | The state tracker — per-client buffers, flags, timestamps |
+| `ThreadPool.hpp` | The task distributor — manages worker threads and the queue |
+| `MimeTypes.hpp` | The file type detector — maps `.html`, `.css`, `.js` to proper Content-Type |
+| `main.cpp` | The setup — registers routes, handles signals, starts the server |
 
 ---
 
-*Nexus HTTP Server — C++20, Linux epoll, zero dependencies.*
+## ✅ Bug Fixes Applied
+
+The following bugs were identified and fixed during the audit:
+
+| Bug | Problem | Fix |
+| --- | --- | --- |
+| **Buffer leak on oversized requests** | When `Content-Length` exceeded the limit, the body bytes were never consumed from the read buffer, causing stale data to accumulate | Body bytes are now correctly consumed even when rejecting oversized requests |
+| **Silent `setsockopt` failures** | `SO_REUSEADDR` and `TCP_NODELAY` errors were ignored, leading to subtle socket issues | Added proper error checking with exceptions and warnings |
+| **`EPOLL_CTL_ADD` on already-registered fd** | Could fail with `EEXIST` in edge cases | Added fallback to `EPOLL_CTL_MOD` |
+| **No idle timeout** | Keep-alive clients that never send another request hold a file descriptor forever | Added 30-second idle timeout that automatically closes stale connections |
+| **Fixed-size events buffer** | If more than 64 events fired in one `epoll_wait` call, some were silently dropped | Dynamic resizing of the events buffer |
+| **No graceful shutdown** | `stopServer()` closed all connections immediately, potentially dropping in-flight responses | Server now drains completed responses before closing everything |
+| **Missing `Content-Length` for static files** | Static file responses didn't set an explicit content length hint | Added `contentLengthHint` for accurate headers |
+
+---
+
+## 🆕 New Features Added
+
+| Feature | Description |
+| --- | --- |
+| **Named route parameters** | `server->route("GET", "/user/:id", ...)` extracts `req.routeParams["id"]` |
+| **Regex route matching** | `server->routeRegex("GET", R"(/path/\d+)", ...)` supports full regex patterns |
+| **Query parameter routes** | Demonstrates query string handling with `/api/search?q=<term>` |
+| **Enhanced request model** | `HttpRequest` now includes `routeParams` alongside `queryParams` |
+| **Idle connection timeout** | 30-second inactivity timeout prevents file descriptor leaks |
+| **Dynamic event buffer** | `epoll_wait` buffer grows automatically under heavy load |
+| **Graceful shutdown** | Drains in-flight responses before exiting |
+
+---
+
+## 🔮 Known Limitations
+
+These are honest gaps in the current implementation — areas that could be improved:
+
+- **No TLS/HTTPS** — Traffic is plain HTTP/1.1. HTTPS should sit behind a reverse proxy like Nginx or Caddy.
+- **Whole files buffered in memory** — Large static files are read entirely into memory. A production server would use `sendfile()` or similar zero-copy techniques.
+- **No config file** — Port, workers, routes, and static root are all hardcoded in `src/main.cpp`. A JSON or YAML config file would make deployment easier.
+- **No automated tests** — The parser has edge cases (bare `\n`, chunked encoding, giant `Content-Length`) that would benefit from a unit test suite.
+- **No compression** — No gzip or brotli compression for responses.
+- **No WebSocket support** — Only HTTP/1.1 is implemented.
+- **No IPv6** — Only IPv4 addresses are supported.
+- **No rate limiting** — Any client can send unlimited requests.
+
+---
+
+## 🚀 What's Next?
+
+Ideas for future development:
+
+1. **Config file support** — Load routes, ports, and settings from a JSON/YAML file
+2. **Unit tests** — Test the parser, router, and connection handling
+3. **Access logging** — Log every request to a file with timestamps and status codes
+4. **Rate limiting** — Limit requests per IP address per time window
+5. **Compression** — Add gzip/brotli support for responses
+6. **TLS/HTTPS** — Integrate OpenSSL or mbedTLS
+7. **WebSocket upgrade** — Support WebSocket handshakes and framing
+8. **Reverse proxy** — Forward requests to backend services
+9. **IPv6 support** — Dual-stack IPv4/IPv6 listening
+10. **Performance profiling** — Add metrics for requests per second, average latency, active connections
+
+---
+
+*Nexus HTTP Server — C++20, Linux epoll, zero dependencies. Built from the ground up, nothing hidden.*

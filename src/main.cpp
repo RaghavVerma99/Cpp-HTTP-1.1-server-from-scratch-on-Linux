@@ -103,6 +103,45 @@ int main(int argc, char* argv[]) {
             return res;
         });
 
+        server->route("GET", "/api/user/:id", [](const HttpRequest& req) {
+            HttpResponse res;
+            res.status = 200;
+            res.statusMessage = "OK";
+            res.headers["Content-Type"] = "application/json";
+
+            auto it = req.routeParams.find("id");
+            std::string userId = it != req.routeParams.end() ? it->second : "unknown";
+
+            std::ostringstream json;
+            json << "{\n"
+                 << "  \"user_id\": \"" << jsonEscape(userId) << "\",\n"
+                 << "  \"message\": \"User profile for " << jsonEscape(userId) << "\"\n"
+                 << "}";
+            res.body = json.str();
+            return res;
+        });
+
+        server->route("GET", "/api/search", [](const HttpRequest& req) {
+            HttpResponse res;
+            res.status = 200;
+            res.statusMessage = "OK";
+            res.headers["Content-Type"] = "application/json";
+
+            std::string query = "all";
+            auto it = req.queryParams.find("q");
+            if (it != req.queryParams.end() && !it->second.empty()) {
+                query = it->second;
+            }
+
+            std::ostringstream json;
+            json << "{\n"
+                 << "  \"query\": \"" << jsonEscape(query) << "\",\n"
+                 << "  \"results\": []\n"
+                 << "}";
+            res.body = json.str();
+            return res;
+        });
+
         server->route("POST", "/api/echo", [](const HttpRequest& req) {
             HttpResponse res;
             res.status = 200;
@@ -116,6 +155,16 @@ int main(int argc, char* argv[]) {
             }
 
             res.body = req.body.empty() ? "No request body received." : req.body;
+            return res;
+        });
+
+        server->routeRegex("GET", R"(/api/regex/\d+)", [](const HttpRequest& req) {
+            (void)req;
+            HttpResponse res;
+            res.status = 200;
+            res.statusMessage = "OK";
+            res.headers["Content-Type"] = "application/json";
+            res.body = "{\"matched\": \"numeric path\"}";
             return res;
         });
 

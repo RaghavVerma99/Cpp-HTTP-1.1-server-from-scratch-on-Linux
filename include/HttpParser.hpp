@@ -179,9 +179,9 @@ public:
             try {
                 size_t bodyLen = std::stoull(contentLength);
                 if (bodyLen > maxBody) {
-                    out = parse(buf.substr(0, used));
+                    out = parse(buf.substr(0, used + bodyLen));
                     out.requestTooLarge = true;
-                    return {true, used};
+                    return {true, used + bodyLen};
                 }
                 if (used + bodyLen > buf.size()) {
                     return {false, 0};

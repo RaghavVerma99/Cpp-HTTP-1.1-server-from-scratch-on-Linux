@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <chrono>
 
 struct Connection {
     explicit Connection(int fd) : fd(fd) {}
@@ -13,4 +14,5 @@ struct Connection {
     bool taskInFlight = false;
     bool peerClosed = false;
     bool abandoned = false;
+    std::chrono::steady_clock::time_point lastActivity = std::chrono::steady_clock::now();
 };

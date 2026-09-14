@@ -10,5 +10,6 @@ struct HttpRequest {
     std::unordered_map<std::string, std::string> headers;
     std::string body;
     std::unordered_map<std::string, std::string> queryParams;
+    std::unordered_map<std::string, std::string> routeParams;
     bool requestTooLarge = false;
 };
