@@ -8,8 +8,6 @@
 #include <sstream>
 #include <cstring>
 #include <chrono>
-#include <optional>
-#include <regex>
 
 #include <unistd.h>
 #include <cerrno>
@@ -76,57 +74,7 @@ void HttpServer::route(const std::string& method, const std::string& path, Route
     entry.method = method;
     entry.pattern = path;
     entry.handler = std::move(handler);
-    entry.isRegex = false;
     routes.push_back(std::move(entry));
-}
-
-void HttpServer::routeRegex(const std::string& method, const std::string& pattern, RouteHandler handler) {
-    RouteEntry entry;
-    entry.method = method;
-    entry.pattern = pattern;
-    entry.handler = std::move(handler);
-    entry.isRegex = true;
-    entry.regex = std::regex(pattern);
-    routes.push_back(std::move(entry));
-}
-
-std::optional<std::unordered_map<std::string, std::string>> HttpServer::matchRoute(const std::string& method, const std::string& path, RouteEntry& entry) {
-    if (entry.method != method) {
-        return std::nullopt;
-    }
-    if (entry.isRegex) {
-        std::smatch match;
-        if (std::regex_match(path, match, entry.regex)) {
-            std::unordered_map<std::string, std::string> params;
-            for (size_t i = 1; i < match.size(); ++i) {
-                params["$" + std::to_string(i)] = match[i].str();
-            }
-            return params;
-        }
-        return std::nullopt;
-    }
-    if (entry.pattern == path) {
-        return std::unordered_map<std::string, std::string>{};
-    }
-    std::vector<std::string> patternParts;
-    std::vector<std::string> pathParts;
-    std::stringstream ps(entry.pattern);
-    std::stringstream ss(path);
-    std::string pp, sp;
-    while (std::getline(ps, pp, '/')) patternParts.push_back(pp);
-    while (std::getline(ss, sp, '/')) pathParts.push_back(sp);
-    if (patternParts.size() != pathParts.size()) {
-        return std::nullopt;
-    }
-    std::unordered_map<std::string, std::string> params;
-    for (size_t i = 0; i < patternParts.size(); ++i) {
-        if (patternParts[i].size() > 0 && patternParts[i][0] == ':') {
-            params[patternParts[i].substr(1)] = pathParts[i];
-        } else if (patternParts[i] != pathParts[i]) {
-            return std::nullopt;
-        }
-    }
-    return params;
 }
 
 void HttpServer::setStaticDirectory(const std::string& dirPath) {
@@ -222,15 +170,12 @@ void HttpServer::start() {
     }
 
     log("[INFO] Server stopped.");
-
-    log("[INFO] Server stopped.");
 }
 
 void HttpServer::stopServer() {
     if (!running) {
         return;
     }
-    shutdownRequested = true;
     running = false;
 
     if (eventFd != -1) {
@@ -534,12 +479,9 @@ HttpResponse HttpServer::handleRequest(const HttpRequest& req) {
     }
 
     for (auto& entry : routes) {
-        auto params = matchRoute(req.method, req.path, entry);
-        if (params.has_value()) {
-            HttpRequest modifiedReq = req;
-            modifiedReq.routeParams = params.value();
+        if (entry.method == req.method && entry.pattern == req.path) {
             try {
-                res = entry.handler(modifiedReq);
+                res = entry.handler(req);
             } catch (const std::exception& e) {
                 return errorResponse(500, "Internal Server Error", std::string(e.what()));
             }

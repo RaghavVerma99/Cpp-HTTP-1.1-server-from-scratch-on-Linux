@@ -419,10 +419,7 @@ Open your browser to `http://localhost:8080` and you'll see the live dashboard w
 | `/` | `GET` / `HEAD` | Serves the dashboard HTML page | Full HTML page |
 | `/api/status` | `GET` | Health check — uptime, worker count, version | `{"status":"healthy","uptime_seconds":12.4,"thread_pool_workers":4}` |
 | `/api/greet?name=X` | `GET` | Personalized greeting | `{"message":"Hello, X! Welcome..."}` |
-| `/api/user/:id` | `GET` | Named route parameter — extracts `id` from URL | `{"user_id":"42","message":"User profile for 42"}` |
-| `/api/search?q=X` | `GET` | Query parameter — extracts `q` from URL | `{"query":"X","results":[]}` |
 | `/api/echo` | `POST` | Echoes back whatever body you send | Whatever you posted |
-| `/api/regex/\d+` | `GET` | Regex route — matches numeric paths only | `{"matched":"numeric path"}` |
 
 ### Try it with curl:
 
@@ -433,17 +430,8 @@ curl http://localhost:8080/api/status
 # Personalized greeting
 curl 'http://localhost:8080/api/greet?name=Raghav'
 
-# Route parameter
-curl http://localhost:8080/api/user/42
-
-# Query parameter
-curl 'http://localhost:8080/api/search?q=hello'
-
 # POST echo
 curl -X POST -d '{"key":"value"}' http://localhost:8080/api/echo
-
-# Regex route
-curl http://localhost:8080/api/regex/123
 
 # Static file (dashboard)
 curl http://localhost:8080/
@@ -476,48 +464,22 @@ server->route("GET", "/api/hello", [](const HttpRequest& req) {
 });
 ```
 
-### Named Route Parameter
-
-Use `:param` in the path to capture a segment:
-
-```cpp
-server->route("GET", "/api/user/:id", [](const HttpRequest& req) {
-    std::string userId = req.routeParams.at("id");  // "42" from /api/user/42
-    HttpResponse res;
-    res.body = "User ID: " + userId;
-    return res;
-});
-```
-
-### Regex Route
-
-For complex patterns, use regex matching:
-
-```cpp
-server->routeRegex("GET", R"(/api/v\d+/users)", [](const HttpRequest& req) {
-    HttpResponse res;
-    res.body = "Matched a versioned API route!";
-    return res;
-});
-// Matches: /api/v1/users, /api/v2/users, etc.
-```
-
 ### Query Parameters
 
 Query strings are automatically parsed and available in `req.queryParams`:
 
 ```cpp
-server->route("GET", "/api/search", [](const HttpRequest& req) {
-    std::string q = "all";
-    auto it = req.queryParams.find("q");
+server->route("GET", "/api/greet", [](const HttpRequest& req) {
+    std::string name = "Guest";
+    auto it = req.queryParams.find("name");
     if (it != req.queryParams.end()) {
-        q = it->second;
+        name = it->second;
     }
     HttpResponse res;
-    res.body = "Searching for: " + q;
+    res.body = "Hello, " + name;
     return res;
 });
-// /api/search?q=cat → "Searching for: cat"
+// /api/greet?name=Raghav → "Hello, Raghav"
 ```
 
 ### POST Requests
@@ -601,10 +563,6 @@ The following bugs were identified and fixed during the audit:
 
 | Feature | Description |
 | --- | --- |
-| **Named route parameters** | `server->route("GET", "/user/:id", ...)` extracts `req.routeParams["id"]` |
-| **Regex route matching** | `server->routeRegex("GET", R"(/path/\d+)", ...)` supports full regex patterns |
-| **Query parameter routes** | Demonstrates query string handling with `/api/search?q=<term>` |
-| **Enhanced request model** | `HttpRequest` now includes `routeParams` alongside `queryParams` |
 | **Idle connection timeout** | 30-second inactivity timeout prevents file descriptor leaks |
 | **Dynamic event buffer** | `epoll_wait` buffer grows automatically under heavy load |
 | **Graceful shutdown** | Drains in-flight responses before exiting |

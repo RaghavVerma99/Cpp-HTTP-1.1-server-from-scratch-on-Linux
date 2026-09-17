@@ -12,8 +12,6 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
-#include <regex>
-#include <map>
 
 using RouteHandler = std::function<HttpResponse(const HttpRequest&)>;
 
@@ -21,8 +19,6 @@ struct RouteEntry {
     std::string method;
     std::string pattern;
     RouteHandler handler;
-    std::regex regex;
-    bool isRegex = false;
 };
 
 class HttpServer {
@@ -34,7 +30,6 @@ public:
     HttpServer& operator=(const HttpServer&) = delete;
 
     void route(const std::string& method, const std::string& path, RouteHandler handler);
-    void routeRegex(const std::string& method, const std::string& pattern, RouteHandler handler);
     void setStaticDirectory(const std::string& dirPath);
     void start();
     void stopServer();
@@ -65,7 +60,6 @@ private:
 
     HttpResponse handleRequest(const HttpRequest& req);
     HttpResponse serveStatic(const std::string& path);
-    std::optional<std::unordered_map<std::string, std::string>> matchRoute(const std::string& method, const std::string& path, RouteEntry& entry);
 
     std::string ipAddress;
     int serverPort;
@@ -73,7 +67,6 @@ private:
     int epollFd = -1;
     int eventFd = -1;
     std::atomic<bool> running{false};
-    std::atomic<bool> shutdownRequested{false};
     std::string staticDir;
 
     ThreadPool threadPool;
